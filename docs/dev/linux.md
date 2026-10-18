@@ -188,3 +188,10 @@ Without `--bundle` the host connects to the dev server on this machine (`--dev-s
 - **No desktop equivalent**: the status bar; `AccessibilityFocus` moves keyboard focus when the view can take it.
 - **Packaged apps** are a directory and a `.tar.gz` (`embedding.md`); GTK 4, Pango and (with the release runner's
   default `webview` feature) WebKitGTK 6.0 must be installed where they run.
+
+### Programmatic window size
+
+`Window.setFrame` merges supplied dimensions with `gtk::Window::default_size`,
+then calls `set_default_size`. GTK applies the request asynchronously, so merging
+with the widget allocation would discard earlier partial updates in the same batch.
+The window manager controls placement and stacking; resize animation is immediate.

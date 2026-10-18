@@ -228,3 +228,13 @@ Without `--bundle` the host connects to the dev server on this machine (`--dev-s
 - **Precision touchpads**: Windows sends its own inertia as more wheel deltas, so a glide cannot be stopped by
   touching the pad.
 - **Packaged apps** are a directory with `<name>.exe` and a `.zip` (`embedding.md`); nothing is installed.
+
+### Programmatic window frame and level
+
+`Window.setFrame` merges supplied fields with `GetWindowRect` and uses
+`SetWindowPos` without changing activation or z-order. Dimensions include the
+non-client area; points are scaled by the surface's current DPI. Changes are
+immediate. `Window.setLevel` uses `HWND_TOPMOST`, `HWND_NOTOPMOST` or `HWND_BOTTOM`;
+the last moves to the bottom of the current z-order, and later activation can
+raise the window. The top-level guard keeps these commands out of embedded child
+windows.

@@ -224,3 +224,8 @@ shots of macOS and Windows.
   common formats), besides a Vulkan driver and xkbcommon.
 - **Dev logs** (feature `dev`): the log forwarder is per process (`dev.rs`' `CLIENT` / `CONNECTED`), so with several
   `AppView`s connected to dev servers every view's logs go to the most recent session.
+
+### Programmatic window frame and level
+
+The host chooses window bounds and level when opening a GPUI window.
+`Window.setFrame` and `Window.setLevel` commands leave those host settings intact.

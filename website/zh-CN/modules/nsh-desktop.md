@@ -48,9 +48,13 @@ const Window: {
 | `minimize()` | 最小化窗口。 |
 | `toggleMaximize()` | 最大化窗口，已最大化时还原。 |
 | `toggleFullScreen()` | 进入或退出全屏。 |
-| `setFrame(frame)` | 移动窗口并调整大小：省略的字段保持原值。`x` 和 `y` 是屏幕坐标（单位为点）——macOS 上是窗口的左下角，其他平台是左上角（Linux 上窗口位置由合成器决定，因此它们不起作用）；`width` 和 `height` 是窗口大小；`animated` 让变化平滑过渡（默认为 false）。 |
-| `setLevel(level)` | 窗口的层级：`"floating"` 让它浮在普通窗口之上（面板、小部件），`"desktopIcon"` 把它放到所有窗口之下、桌面图标一层（macOS；Windows 上是把窗口放到 z 序最底部），`"normal"` 恢复默认。GTK 没有窗口层级，所以在 Linux 上不起作用。 |
+| `setFrame(frame)` | 移动窗口并调整大小，单位为点；省略的字段保持原值。macOS 和 Windows 上的 `width`、`height` 包含窗口装饰；Linux 上设置 GTK 的默认窗口尺寸。`x`、`y` 在 macOS 屏幕坐标中表示窗口左下角，在 Windows 上表示左上角。`animated: true` 启用 macOS 的窗口调整动画（默认为 false）。 |
+| `setLevel(level)` | 在 macOS 和 Windows 上，`"floating"` 让窗口保持在普通窗口之上，`"normal"` 恢复普通层级。`"desktopIcon"` 在 macOS 上选择桌面图标层级；在 Windows 上将窗口移到当前 z 序底部，之后激活窗口仍可将其提升。 |
 | `close()` | 关闭窗口，应用随之结束。 |
+
+窗口尺寸调整适用于 macOS、Windows 和 Linux；窗口定位和层级控制适用于 macOS 和 Windows。Linux 的窗口位置和层级由窗口管理器决定。GPUI 窗口的尺寸、位置和层级由宿主在创建窗口时配置。
+
+使用 `onLayout` 测量内容后调整窗口大小时，在 macOS 和 Windows 上应为窗口装饰预留空间。`width` 和 `height` 接受正有限数值；`x` 和 `y` 接受有限数值。无效字段保留原值。
 
 ## 自定义标题栏
 

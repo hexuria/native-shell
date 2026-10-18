@@ -56,12 +56,13 @@ impl Window {
         desktop(cx, DesktopCommand::ToggleFullScreen);
     }
 
-    /// Moves and sizes the window: a field left out keeps its value.
-    /// `x` and `y` are screen coordinates in points (the window's bottom
-    /// left corner on macOS, its top left elsewhere — where the platform
-    /// does not let an app place its window, they do nothing); `width`
-    /// and `height` its size; `animated` smooths the change (false by
-    /// default).
+    /// Moves and sizes the window in points; omitted fields keep their values.
+    /// macOS and Windows use the outer frame, including window decorations;
+    /// Linux uses GTK's default window size. `x` and `y` are the bottom left
+    /// corner in macOS screen coordinates and the top left on Windows.
+    /// `animated` enables macOS's resize animation (false by default).
+    /// Sizing is supported on macOS, Windows and Linux; positioning and levels
+    /// on macOS and Windows. GPUI's host chooses its bounds and level.
     pub(crate) fn set_frame(frame: WindowFrame, cx: &mut ModuleCx) {
         let frame = WindowFrame {
             x: frame.x.filter(|v| v.is_finite()),
@@ -73,9 +74,11 @@ impl Window {
         desktop(cx, DesktopCommand::SetFrame(frame));
     }
 
-    /// The window's level: `"normal"`, `"floating"` (above normal
-    /// windows: a palette, a widget) or `"desktopIcon"` (behind every
-    /// window, at the desktop's icons; macOS).
+    /// Sets the window's level on macOS and Windows: `"normal"` restores the
+    /// normal level; `"floating"` stays above normal windows. `"desktopIcon"`
+    /// selects macOS's desktop icon level or moves a Windows window to the
+    /// bottom of the current z-order, where later activation can raise it.
+    /// GTK and GPUI leave the level to the host and window manager.
     pub(crate) fn set_level(level: WindowLevel, cx: &mut ModuleCx) {
         desktop(cx, DesktopCommand::SetLevel(level));
     }

@@ -31,11 +31,11 @@ pub struct WindowFrame {
     pub x: Option<f32>,
     /// Its bottom edge on macOS, its top edge elsewhere.
     pub y: Option<f32>,
-    /// Its width.
+    /// Its outer width on macOS / Windows, GTK default width on Linux.
     pub width: Option<f32>,
-    /// Its height.
+    /// Its outer height on macOS / Windows, GTK default height on Linux.
     pub height: Option<f32>,
-    /// The change is animated (false by default).
+    /// Animates the change on macOS (false by default).
     pub animated: Option<bool>,
 }
 
@@ -47,7 +47,8 @@ pub enum WindowLevel {
     Normal,
     /// Above normal windows: a floating palette or a widget.
     Floating,
-    /// Behind every window, at the desktop's icons.
+    /// macOS's desktop icon level; on Windows, moves to the bottom of
+    /// the current z-order (later activation can raise the window).
     #[prop(rename = "desktopIcon")]
     DesktopIcon,
 }
