@@ -30,7 +30,10 @@ use std::{
 
 use nsh_core::{
     Color, EventKind, EventPayload, PayloadValue, ROOT_ID,
-    desktop::{DesktopCommand, Key, MenuAction, MenuItem, MenuRole, Shortcut, TitleBarStyle},
+    desktop::{
+        DesktopCommand, Key, MenuAction, MenuItem, MenuRole, Shortcut, TitleBarStyle, WindowFrame,
+        WindowLevel,
+    },
     platform::Insets,
 };
 use windows::{
@@ -246,6 +249,8 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
         }
         DesktopCommand::ToggleMaximize => toggle_maximize(surface),
         DesktopCommand::ToggleFullScreen => toggle_fullscreen(surface),
+        DesktopCommand::SetFrame(frame) => set_frame(surface, hwnd, frame),
+        DesktopCommand::SetLevel(level) => set_level(hwnd, *level),
         DesktopCommand::Close => close(hwnd),
         DesktopCommand::SetMenu(menu) => {
             *c.menu.borrow_mut() = menu.clone();
@@ -260,6 +265,63 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
             },
         ),
     }
+}
+
+/// Moves and sizes the window: a field left out keeps its value. The
+/// points of `Window.setFrame` are pixels at `surface.scale()`; Win32
+/// works on the outer frame (non-client area included), as does
+/// `GetWindowRect`.
+fn set_frame(surface: &Surface, hwnd: HWND, frame: &WindowFrame) {
+    let mut rect = RECT::default();
+    // SAFETY: a plain query with a local out value.
+    if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
+        return;
+    }
+    let scale = surface.scale();
+    let x = frame.x.map_or(rect.left, |v| (v * scale).round() as i32);
+    let y = frame.y.map_or(rect.top, |v| (v * scale).round() as i32);
+    let width = frame
+        .width
+        .map_or(rect.right - rect.left, |v| (v * scale).round() as i32);
+    let height = frame
+        .height
+        .map_or(rect.bottom - rect.top, |v| (v * scale).round() as i32);
+    // SAFETY: a plain call on a live window; SWP_NOZORDER keeps the level
+    // `set_level` may have set.
+    let _ = unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            x,
+            y,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    };
+}
+
+/// The window's level: `HWND_TOPMOST` floats, `HWND_NOTOPMOST` is the
+/// normal level, `HWND_BOTTOM` is the closest Windows has to the
+/// desktop's icons (nothing draws below them).
+fn set_level(hwnd: HWND, level: WindowLevel) {
+    let order = match level {
+        WindowLevel::Normal => HWND_NOTOPMOST,
+        WindowLevel::Floating => HWND_TOPMOST,
+        WindowLevel::DesktopIcon => HWND_BOTTOM,
+    };
+    // SAFETY: a plain call on a live window.
+    let _ = unsafe {
+        SetWindowPos(
+            hwnd,
+            Some(order),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    };
 }
 
 /// Shows `menu` from the message loop: `TrackPopupMenuEx` runs one of its

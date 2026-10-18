@@ -288,6 +288,7 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
   "CGGradient",
   "CGImage",
   "CGPath",
+  "CGWindowLevel",
 ] }
 objc2-core-text = { version = "0.3.2", default-features = false, features = [
   "std",

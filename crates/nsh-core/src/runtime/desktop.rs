@@ -4,7 +4,7 @@
 
 use crate::{
     Command, ROOT_ID,
-    desktop::{DesktopCommand, TitleBarStyle},
+    desktop::{DesktopCommand, TitleBarStyle, WindowFrame, WindowLevel},
     ui::{ModuleCx, module, task::Action},
 };
 
@@ -54,6 +54,30 @@ impl Window {
     /// Enters or leaves full screen.
     pub(crate) fn toggle_full_screen(cx: &mut ModuleCx) {
         desktop(cx, DesktopCommand::ToggleFullScreen);
+    }
+
+    /// Moves and sizes the window: a field left out keeps its value.
+    /// `x` and `y` are screen coordinates in points (the window's bottom
+    /// left corner on macOS, its top left elsewhere — where the platform
+    /// does not let an app place its window, they do nothing); `width`
+    /// and `height` its size; `animated` smooths the change (false by
+    /// default).
+    pub(crate) fn set_frame(frame: WindowFrame, cx: &mut ModuleCx) {
+        let frame = WindowFrame {
+            x: frame.x.filter(|v| v.is_finite()),
+            y: frame.y.filter(|v| v.is_finite()),
+            width: frame.width.filter(|v| v.is_finite() && *v > 0.0),
+            height: frame.height.filter(|v| v.is_finite() && *v > 0.0),
+            animated: frame.animated,
+        };
+        desktop(cx, DesktopCommand::SetFrame(frame));
+    }
+
+    /// The window's level: `"normal"`, `"floating"` (above normal
+    /// windows: a palette, a widget) or `"desktopIcon"` (behind every
+    /// window, at the desktop's icons; macOS).
+    pub(crate) fn set_level(level: WindowLevel, cx: &mut ModuleCx) {
+        desktop(cx, DesktopCommand::SetLevel(level));
     }
 
     /// Closes the window; the app ends with it.

@@ -239,6 +239,9 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
         DesktopCommand::Minimize => push(surface, Op::Minimize),
         DesktopCommand::ToggleMaximize => push(surface, Op::ToggleMaximize),
         DesktopCommand::ToggleFullScreen => push(surface, Op::ToggleFullScreen),
+        // GPUI's window bounds are chosen when the window opens, and it
+        // has no window levels.
+        DesktopCommand::SetFrame(_) | DesktopCommand::SetLevel(_) => {}
         DesktopCommand::Close => push(surface, Op::Close),
         DesktopCommand::SetMenu(menu) => {
             *c.menu.borrow_mut() = menu.clone();

@@ -29,6 +29,14 @@ const Window: {
   minimize(): void;
   toggleMaximize(): void;
   toggleFullScreen(): void;
+  setFrame(frame: {
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+    animated?: boolean;
+  }): void;
+  setLevel(level: "normal" | "floating" | "desktopIcon"): void;
   close(): void;
 };
 ```
@@ -40,6 +48,8 @@ const Window: {
 | `minimize()` | 最小化窗口。 |
 | `toggleMaximize()` | 最大化窗口，已最大化时还原。 |
 | `toggleFullScreen()` | 进入或退出全屏。 |
+| `setFrame(frame)` | 移动窗口并调整大小：省略的字段保持原值。`x` 和 `y` 是屏幕坐标（单位为点）——macOS 上是窗口的左下角，其他平台是左上角（Linux 上窗口位置由合成器决定，因此它们不起作用）；`width` 和 `height` 是窗口大小；`animated` 让变化平滑过渡（默认为 false）。 |
+| `setLevel(level)` | 窗口的层级：`"floating"` 让它浮在普通窗口之上（面板、小部件），`"desktopIcon"` 把它放到所有窗口之下、桌面图标一层（macOS；Windows 上是把窗口放到 z 序最底部），`"normal"` 恢复默认。GTK 没有窗口层级，所以在 Linux 上不起作用。 |
 | `close()` | 关闭窗口，应用随之结束。 |
 
 ## 自定义标题栏

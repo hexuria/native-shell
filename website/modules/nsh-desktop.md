@@ -29,6 +29,14 @@ const Window: {
   minimize(): void;
   toggleMaximize(): void;
   toggleFullScreen(): void;
+  setFrame(frame: {
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+    animated?: boolean;
+  }): void;
+  setLevel(level: "normal" | "floating" | "desktopIcon"): void;
   close(): void;
 };
 ```
@@ -40,6 +48,8 @@ const Window: {
 | `minimize()` | Minimizes the window. |
 | `toggleMaximize()` | Maximizes the window, or restores it when it is maximized. |
 | `toggleFullScreen()` | Enters or leaves full screen. |
+| `setFrame(frame)` | Moves and sizes the window: a field left out keeps its value. `x` and `y` are screen coordinates in points — the window's bottom left corner on macOS, its top left elsewhere (on Linux the compositor places windows, so they do nothing); `width` and `height` are its size; `animated` smooths the change (false by default). |
+| `setLevel(level)` | The window's level: `"floating"` keeps it above normal windows (a palette, a widget), `"desktopIcon"` puts it behind every window at the desktop's icons (macOS; on Windows it goes to the bottom of the window order), `"normal"` restores it. GTK has no window levels, so it does nothing on Linux. |
 | `close()` | Closes the window; the app ends with it. |
 
 ## A title bar of your own

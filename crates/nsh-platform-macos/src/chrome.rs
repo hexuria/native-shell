@@ -44,7 +44,10 @@ use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use nsh_core::{
     EventKind, EventPayload, PayloadValue, ROOT_ID,
-    desktop::{DesktopCommand, Key, MenuAction, MenuItem, MenuRole, Shortcut, TitleBarStyle},
+    desktop::{
+        DesktopCommand, Key, MenuAction, MenuItem, MenuRole, Shortcut, TitleBarStyle, WindowFrame,
+        WindowLevel,
+    },
     platform::Insets,
 };
 use objc2::{
@@ -54,13 +57,14 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSButton, NSEvent, NSEventModifierFlags, NSMenu, NSMenuItem,
-    NSRunningApplication, NSViewFrameDidChangeNotification, NSWindow, NSWindowButton,
-    NSWindowStyleMask, NSWindowTitleVisibility,
+    NSApplication, NSButton, NSEvent, NSEventModifierFlags, NSFloatingWindowLevel, NSMenu,
+    NSMenuItem, NSNormalWindowLevel, NSRunningApplication, NSViewFrameDidChangeNotification,
+    NSWindow, NSWindowButton, NSWindowStyleMask, NSWindowTitleVisibility,
 };
+use objc2_core_graphics::kCGDesktopIconWindowLevel;
 use objc2_foundation::{
-    NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSString,
-    NSUserDefaults, ns_string,
+    NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
+    NSString, NSUserDefaults, ns_string,
 };
 
 use crate::surface::Surface;
@@ -415,6 +419,20 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
                 window.toggleFullScreen(None);
             }
         }
+        DesktopCommand::SetFrame(frame) => {
+            if let Some(window) = window(surface) {
+                set_frame(&window, frame);
+            }
+        }
+        DesktopCommand::SetLevel(level) => {
+            if let Some(window) = window(surface) {
+                window.setLevel(match level {
+                    WindowLevel::Normal => NSNormalWindowLevel,
+                    WindowLevel::Floating => NSFloatingWindowLevel,
+                    WindowLevel::DesktopIcon => kCGDesktopIconWindowLevel as isize,
+                });
+            }
+        }
         DesktopCommand::Close => {
             if let Some(window) = window(surface) {
                 window.performClose(None);
@@ -434,6 +452,25 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
             });
         }
     }
+}
+
+/// Moves and sizes the window: a field left out keeps its value
+/// (`setFrame`'s screen coordinates are the bottom left corner's).
+fn set_frame(window: &NSWindow, frame: &WindowFrame) {
+    let current = window.frame();
+    let point = NSPoint::new(
+        frame.x.map_or(current.origin.x, f64::from),
+        frame.y.map_or(current.origin.y, f64::from),
+    );
+    let size = NSSize::new(
+        frame.width.map_or(current.size.width, f64::from),
+        frame.height.map_or(current.size.height, f64::from),
+    );
+    window.setFrame_display_animate(
+        NSRect::new(point, size),
+        true,
+        frame.animated.unwrap_or(false),
+    );
 }
 
 /// The window's style for the title bar's.
