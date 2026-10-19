@@ -219,7 +219,7 @@ active first: WebKit takes left clicks only in the active app (in another, a cli
 
 ```sh
 nsh build examples/gallery -o /tmp/gallery
-./target/debug/nsh-macos-host --bundle /tmp/gallery/bundle.nshc --size 1200x800 \
+./target/debug/nsh-macos-host --bundle /tmp/gallery/bundle.nshc --window-size 1200x800 \
   --script "wait 1000; shot /tmp/a.png; tap 83 350; wait 500; shot /tmp/b.png; quit"
 ```
 

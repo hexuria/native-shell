@@ -57,10 +57,10 @@ bundle on its own:
 
 ```sh
 nsh build my-app --release -o build
-dist/nsh/runtime/gpui/nsh-gpui-host --bundle build/bundle.nshc --size 390x844   # in a checkout: target/debug/nsh-gpui-host
+dist/nsh/runtime/gpui/nsh-gpui-host --bundle build/bundle.nshc --window-size 390x844   # in a checkout: target/debug/nsh-gpui-host
 ```
 
-`--size` is the window's size in points (`<width>x<height>`).
+`--window-size` is the window's size in points (`<width>x<height>`).
 
 ## Packaging
 

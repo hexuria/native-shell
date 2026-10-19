@@ -201,7 +201,7 @@ enum Command {
         name: Option<String>,
         /// The window's initial size, `WxH` in points (the host's default
         /// by default; `--target macos` only).
-        #[arg(long)]
+        #[arg(long = "window-size", value_name = "WIDTHxHEIGHT")]
         size: Option<String>,
         /// Script steps to run once the window shows (`wait`, `shot`,
         /// `tap`, `quit`, ...; `--target macos` only). With `quit` the

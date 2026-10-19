@@ -67,7 +67,7 @@ Run the host on a rootful Xwayland display of its own, so nothing touches the de
 Xwayland :170 -noreset -shm -geometry 1400x1000 & sleep 1.5
 nsh build examples/gallery -o build
 DISPLAY=:170 WAYLAND_DISPLAY= WEBKIT_DISABLE_DMABUF_RENDERER=1 target/debug/nsh-gpui-host --bundle build/bundle.nshc \
-  --size 700x500 --script "wait 800; shot a.png; tap 100 200; shot b.png; quit"
+  --window-size 700x500 --script "wait 800; shot a.png; tap 100 200; shot b.png; quit"
 import -window root -display :170 whole.png        # the display, if the window's own shot is not enough
 ```
 

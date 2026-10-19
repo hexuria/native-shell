@@ -48,10 +48,10 @@ nsh run my-app --target gpui
 
 ```sh
 nsh build my-app --release -o build
-dist/nsh/runtime/gpui/nsh-gpui-host --bundle build/bundle.nshc --size 390x844   # 源码仓库中：target/debug/nsh-gpui-host
+dist/nsh/runtime/gpui/nsh-gpui-host --bundle build/bundle.nshc --window-size 390x844   # 源码仓库中：target/debug/nsh-gpui-host
 ```
 
-`--size` 是窗口的尺寸，单位为点（`<宽>x<高>`）。
+`--window-size` 是窗口的尺寸，单位为点（`<宽>x<高>`）。
 
 ## 打包
 

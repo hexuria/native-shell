@@ -103,7 +103,7 @@ pub(crate) fn run(
         bail!("--fps needs --target macos (the other hosts have no performance monitor yet)");
     }
     if (name.is_some() || size.is_some() || script.is_some()) && target != Target::Macos {
-        bail!("--name, --size and --script need --target macos (the other hosts do not take them yet)");
+        bail!("--name, --window-size and --script need --target macos (the other hosts do not take them yet)");
     }
     let work = dunce::canonicalize(entry)?
         .parent()
@@ -181,7 +181,7 @@ pub(crate) fn run(
                 .args(["-ApplePersistenceIgnoreState", "YES"]);
             if let Some(size) = size {
                 // `WxH` in points; the host opens the window at this size.
-                command.args(["--size", size]);
+                command.args(["--window-size", size]);
             }
             if let Some(script) = script {
                 // Steps run once the window shows; `quit` in them closes
