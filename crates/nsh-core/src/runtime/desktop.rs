@@ -69,6 +69,7 @@ impl Window {
             width: frame.width.filter(|v| v.is_finite() && *v > 0.0),
             height: frame.height.filter(|v| v.is_finite() && *v > 0.0),
             animated: frame.animated,
+            anchor_top: frame.anchor_top,
         };
         desktop(cx, DesktopCommand::SetFrame(frame));
     }
@@ -80,6 +81,13 @@ impl Window {
     /// Elsewhere the level is left to the host and the window manager.
     pub(crate) fn set_level(level: WindowLevel, cx: &mut ModuleCx) {
         desktop(cx, DesktopCommand::SetLevel(level));
+    }
+
+    /// Brings the window to the front of its level and focuses it (the app
+    /// activates). The level does not change: a normal window does not
+    /// start floating, a desktop-level surface stays behind windows.
+    pub(crate) fn order_front(cx: &mut ModuleCx) {
+        desktop(cx, DesktopCommand::OrderFront);
     }
 
     /// Closes the window; the app ends with it.

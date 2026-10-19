@@ -59,7 +59,8 @@ use objc2::{
 use objc2_app_kit::{
     NSApplication, NSButton, NSEvent, NSEventModifierFlags, NSFloatingWindowLevel, NSMenu,
     NSMenuItem, NSNormalWindowLevel, NSRunningApplication, NSViewFrameDidChangeNotification,
-    NSWindow, NSWindowButton, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSWindow, NSWindowButton, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSWindowTitleVisibility,
 };
 use objc2_core_graphics::kCGDesktopIconWindowLevel;
 use objc2_foundation::{
@@ -431,6 +432,29 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
                     WindowLevel::Floating => NSFloatingWindowLevel,
                     WindowLevel::DesktopIcon => kCGDesktopIconWindowLevel as isize,
                 });
+                // A desktop widget is a part of the desktop, not a window:
+                // it sits on every space, Mission Control does not list it
+                // (it could never be raised above normal windows anyway)
+                // and Cmd+` cycles past it. Ordinary levels stay managed.
+                window.setCollectionBehavior(match level {
+                    WindowLevel::DesktopIcon => {
+                        NSWindowCollectionBehavior::Stationary
+                            | NSWindowCollectionBehavior::CanJoinAllSpaces
+                            | NSWindowCollectionBehavior::IgnoresCycle
+                    }
+                    _ => NSWindowCollectionBehavior::MoveToActiveSpace,
+                });
+            }
+        }
+        DesktopCommand::OrderFront => {
+            if let (Some(window), Some(mtm)) =
+                (window(surface), MainThreadMarker::new())
+            {
+                window.deminiaturize(None);
+                // activate() first: ordering a window front in an inactive
+                // app leaves it behind the front app's windows.
+                NSApplication::sharedApplication(mtm).activate();
+                window.makeKeyAndOrderFront(None);
             }
         }
         DesktopCommand::Close => {
@@ -458,14 +482,24 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
 /// (`setFrame`'s screen coordinates are the bottom left corner's).
 fn set_frame(window: &NSWindow, frame: &WindowFrame) {
     let current = window.frame();
-    let point = NSPoint::new(
-        frame.x.map_or(current.origin.x, f64::from),
-        frame.y.map_or(current.origin.y, f64::from),
-    );
     let size = NSSize::new(
         frame.width.map_or(current.size.width, f64::from),
         frame.height.map_or(current.size.height, f64::from),
     );
+    // `anchorTop` keeps the top edge where it is: the bottom left origin
+    // would otherwise pin the bottom edge, and a content-height window
+    // resized around its middle.
+    let y = frame.y.map_or_else(
+        || {
+            if frame.anchor_top == Some(true) {
+                current.origin.y + current.size.height - size.height
+            } else {
+                current.origin.y
+            }
+        },
+        f64::from,
+    );
+    let point = NSPoint::new(frame.x.map_or(current.origin.x, f64::from), y);
     window.setFrame_display_animate(
         NSRect::new(point, size),
         true,

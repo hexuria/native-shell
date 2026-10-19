@@ -251,6 +251,12 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
         DesktopCommand::ToggleFullScreen => toggle_fullscreen(surface),
         DesktopCommand::SetFrame(frame) => set_frame(surface, hwnd, frame),
         DesktopCommand::SetLevel(level) => set_level(hwnd, *level),
+        DesktopCommand::OrderFront => {
+            // SAFETY: a plain call.
+            let _ = unsafe { ShowWindow(hwnd, SW_RESTORE) };
+            // SAFETY: a plain call.
+            let _ = unsafe { SetForegroundWindow(hwnd) };
+        }
         DesktopCommand::Close => close(hwnd),
         DesktopCommand::SetMenu(menu) => {
             *c.menu.borrow_mut() = menu.clone();
