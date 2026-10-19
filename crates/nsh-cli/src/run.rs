@@ -74,6 +74,18 @@ pub(crate) struct HostFlags {
     pub(crate) fps: bool,
 }
 
+/// The host window's own options; only the macOS host takes them, for
+/// now.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct HostWindow<'a> {
+    /// The app's name in the host (the menu bar, the window title).
+    pub(crate) name: Option<&'a str>,
+    /// The window's initial size, `WxH` in points.
+    pub(crate) size: Option<&'a str>,
+    /// Script steps to run once the window shows.
+    pub(crate) script: Option<&'a str>,
+}
+
 /// Starts a dev session and runs the app in a development host, which
 /// loads bundles from the dev server and reloads on change.
 pub(crate) fn run(
@@ -83,11 +95,10 @@ pub(crate) fn run(
     flags: HostFlags,
     target: Target,
     device: Option<&str>,
-    name: Option<&str>,
-    size: Option<&str>,
-    script: Option<&str>,
+    window: HostWindow<'_>,
 ) -> anyhow::Result<()> {
     let HostFlags { trace, fps } = flags;
+    let HostWindow { name, size, script } = window;
     if fps && target != Target::Macos {
         bail!("--fps needs --target macos (the other hosts have no performance monitor yet)");
     }
