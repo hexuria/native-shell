@@ -353,12 +353,13 @@ pub(crate) fn track_states(surface: &Rc<Surface>, view: &NshView, states: u8) {
 }
 
 /// Whether hovering `view` matters: for its `hover:` styles (the
-/// `HOVERED` state) or its `onHoverIn` / `onHoverOut`.
+/// `HOVERED` state) or its `onHoverIn` / `onHoverOut` / `onMouseMove`.
 fn hoverable(view: &NshView) -> bool {
     let s = view.state();
     s.tracked & HOVERED != 0
         || s.events.contains(EventKind::HoverIn)
         || s.events.contains(EventKind::HoverOut)
+        || s.events.contains(EventKind::MouseMove)
 }
 
 fn update_hover_tracking(surface: &Surface, view: &NshView) {
@@ -1837,6 +1838,25 @@ fn hover(surface: &Surface, x: f32, y: f32) {
         None => Vec::new(),
     };
     set_hovered(surface, views);
+    if let Some(hit) = pick(&surface.root, x, y) {
+        for view in chain(&hit.view) {
+            let (id, listens) = {
+                let s = view.state();
+                (s.id, s.events.contains(EventKind::MouseMove))
+            };
+            if listens {
+                let (lx, ly) = local(surface, &view, x, y);
+                surface.event(
+                    id,
+                    EventKind::MouseMove,
+                    EventPayload::Map(vec![
+                        ("x", PayloadValue::Number(lx as f64)),
+                        ("y", PayloadValue::Number(ly as f64)),
+                    ]),
+                );
+            }
+        }
+    }
 }
 
 /// The scroll views under the mouse at `(x, y)` show their indicators.

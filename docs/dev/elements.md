@@ -95,6 +95,10 @@ misses the deadline is not waited for again until it catches up (`docs/dev/macos
   picked again after every batch (on macOS also after every scroll), so a view removed or moved from under a still mouse hears `onHoverOut` and one
   that arrives there `onHoverIn`; on Linux that waits for the next mouse move. Touches never hover. Other platforms do
   not raise them yet (iOS, Android, Windows and the web track `hover:` styles only).
+- **`onMouseMove`** (any element; macOS) fires as the mouse moves inside the view — every view under the point that
+  listens hears it, innermost out, with `x` / `y` in that view's own coordinates. Listening turns on hover tracking for
+  the view, so the event also keeps firing where no `hover:` style or `onHoverIn` would. Other platforms do not raise
+  it yet.
 - **`onPanEnd` / `onPanStart`** carry `valueX` / `valueY`: the bound pan values at that moment (a drag may grab a value mid
   animation), for snapping.
 - **Imperative calls**: nodes have `focus()`, `blur()` and `scrollTo({ x, y, animated })` (use `ref`); lists also

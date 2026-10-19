@@ -392,6 +392,12 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
         "The mouse left the view and the views inside it, or the window (macOS and Linux).",
     ),
     (
+        EventKind::MouseMove,
+        on::ALL,
+        "(e: { x: number; y: number }) => void",
+        "The mouse moved inside the view (desktops with hover tracking); `x`/`y` are the view's local coordinates.",
+    ),
+    (
         EventKind::FileDragEnter,
         on::ALL,
         "() => void",

@@ -174,6 +174,7 @@ events! {
     Menu = "onMenu": "A menu item was chosen: the application menu's or a context menu's (root only; desktops; payload: `id`), or a context menu closed (`closed`: true, after its item).",
     HoverIn = "onHoverIn": "The mouse came over the view or a view inside it (desktop backends that track the pointer; never on touches).",
     HoverOut = "onHoverOut": "The mouse left the view and the views inside it, or the window (desktop backends that track the pointer).",
+    MouseMove = "onMouseMove": "The mouse moved inside the view (desktops with hover tracking; payload `x`, `y` in the view's local coordinates).",
     FileDragEnter = "onFileDragEnter": "A local file drag entered an eligible desktop drop destination.",
     FileDragLeave = "onFileDragLeave": "A local file drag left its desktop drop destination.",
     FileDrop = "onFileDrop": "Local files were dropped (payload: [`EventPayload::FileDrop`]).",
