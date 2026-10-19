@@ -95,6 +95,12 @@ misses the deadline is not waited for again until it catches up (`docs/dev/macos
   picked again after every batch (on macOS also after every scroll), so a view removed or moved from under a still mouse hears `onHoverOut` and one
   that arrives there `onHoverIn`; on Linux that waits for the next mouse move. Touches never hover. Other platforms do
   not raise them yet (iOS, Android, Windows and the web track `hover:` styles only).
+- **`onContextMenu`** (any element; macOS) fires on a right / secondary click: the innermost view under the point that
+  listens gets it (its ancestors get nothing — a click is one view's, unlike hover). The handler shows the menu itself,
+  `Menu.popup` of `nsh/desktop` — a hosted native view keeps its own menu. Other desktop platforms do not raise it yet.
+- **`onMouseMove`** (any element; macOS) fires when the mouse moves over a view or a view inside it, with view-local
+  `x` / `y` points — for pointer tracking such as eyes following the cursor; a handler alone makes its view take part
+  in hover tracking. Other desktop platforms do not raise it yet.
 - **`onPanEnd` / `onPanStart`** carry `valueX` / `valueY`: the bound pan values at that moment (a drag may grab a value mid
   animation), for snapping.
 - **Imperative calls**: nodes have `focus()`, `blur()` and `scrollTo({ x, y, animated })` (use `ref`); lists also

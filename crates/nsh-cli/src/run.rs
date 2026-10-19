@@ -83,10 +83,16 @@ pub(crate) fn run(
     flags: HostFlags,
     target: Target,
     device: Option<&str>,
+    name: Option<&str>,
+    size: Option<&str>,
+    script: Option<&str>,
 ) -> anyhow::Result<()> {
     let HostFlags { trace, fps } = flags;
     if fps && target != Target::Macos {
         bail!("--fps needs --target macos (the other hosts have no performance monitor yet)");
+    }
+    if (name.is_some() || size.is_some() || script.is_some()) && target != Target::Macos {
+        bail!("--name, --size and --script need --target macos (the other hosts do not take them yet)");
     }
     let work = dunce::canonicalize(entry)?
         .parent()
@@ -150,15 +156,27 @@ pub(crate) fn run(
         // In place too: the AppKit host makes itself a regular app (menu
         // bar, Dock icon) without an app bundle around it.
         Target::Macos => {
-            // The menu bar and the window show the app's name.
+            // The menu bar and the window show the app's name; `--name`
+            // overrides it (a host run for one of the app's windows can
+            // name itself).
             let entry = entry.canonicalize()?;
             let config = crate::package::read_config(&entry).unwrap_or_default();
-            let (name, _) = crate::package::name_and_id(&entry, &config);
+            let (app_name, _) = crate::package::name_and_id(&entry, &config);
+            let name = name.unwrap_or(&app_name);
             let mut command = Command::new(&host);
             command
                 .args(&args)
-                .args(["--name", &name])
+                .args(["--name", name])
                 .args(["-ApplePersistenceIgnoreState", "YES"]);
+            if let Some(size) = size {
+                // `WxH` in points; the host opens the window at this size.
+                command.args(["--size", size]);
+            }
+            if let Some(script) = script {
+                // Steps run once the window shows; `quit` in them closes
+                // the host, which ends this command too.
+                command.args(["--script", script]);
+            }
             run_local(&session, &mut command, "the macOS host")
         }
         Target::Windows => {

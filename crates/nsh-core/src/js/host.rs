@@ -392,6 +392,18 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
         "The mouse left the view and the views inside it, or the window (macOS and Linux).",
     ),
     (
+        EventKind::ContextMenu,
+        on::ALL,
+        "() => void",
+        "The view was right-clicked / secondary-clicked (desktops): show a menu, e.g. `Menu.popup` of `nsh/desktop`.",
+    ),
+    (
+        EventKind::MouseMove,
+        on::ALL,
+        "(e: { x: number; y: number }) => void",
+        "The mouse moved over the view or a view inside it (desktops; `x`, `y` are view-local points).",
+    ),
+    (
         EventKind::FileDragEnter,
         on::ALL,
         "() => void",

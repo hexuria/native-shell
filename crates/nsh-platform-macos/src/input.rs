@@ -353,12 +353,13 @@ pub(crate) fn track_states(surface: &Rc<Surface>, view: &NshView, states: u8) {
 }
 
 /// Whether hovering `view` matters: for its `hover:` styles (the
-/// `HOVERED` state) or its `onHoverIn` / `onHoverOut`.
+/// `HOVERED` state) or its `onHoverIn` / `onHoverOut` / `onMouseMove`.
 fn hoverable(view: &NshView) -> bool {
     let s = view.state();
     s.tracked & HOVERED != 0
         || s.events.contains(EventKind::HoverIn)
         || s.events.contains(EventKind::HoverOut)
+        || s.events.contains(EventKind::MouseMove)
 }
 
 fn update_hover_tracking(surface: &Surface, view: &NshView) {
@@ -641,11 +642,11 @@ pub(crate) fn event(surface: &Rc<Surface>, event: &NSEvent) {
         NSEventType::OtherMouseDown if event.buttonNumber() == BACK_BUTTON => {
             crate::navigation::go_back(surface);
         }
+        NSEventType::RightMouseDown => context_menu(surface, x, y),
         NSEventType::ScrollWheel => scroll_event(surface, event, x, y, time),
         NSEventType::Magnify => magnify(surface, event, x, y),
         NSEventType::Rotate => rotate(surface, event, x, y),
-        // Right and other buttons do nothing (no context menus), as on
-        // Linux.
+        // Other buttons do nothing, as on Linux.
         _ => {}
     }
 }
@@ -1525,6 +1526,25 @@ fn press_event(surface: &Surface, node: NodeId, kind: EventKind) {
     surface.event(node, kind, EventPayload::None);
 }
 
+/// A secondary click at `(x, y)`: the innermost view listening to
+/// `onContextMenu` gets it (its JS shows a menu, `Menu.popup` of
+/// `nsh/desktop`); a hosted native view keeps its own menu.
+fn context_menu(surface: &Rc<Surface>, x: f32, y: f32) {
+    let Some(hit) = pick(&surface.root, x, y) else {
+        return;
+    };
+    if hit.native {
+        return;
+    }
+    if let Some(view) = chain(&hit.view)
+        .into_iter()
+        .find(|v| v.state().events.contains(EventKind::ContextMenu))
+    {
+        let node = view.state().id;
+        press_event(surface, node, EventKind::ContextMenu);
+    }
+}
+
 fn cancel_press(surface: &Rc<Surface>, p: &mut Pointer) {
     if let Some(mut press) = p.press.take() {
         press_out(surface, &mut press, false);
@@ -1837,6 +1857,25 @@ fn hover(surface: &Surface, x: f32, y: f32) {
         None => Vec::new(),
     };
     set_hovered(surface, views);
+    if let Some(hit) = pick(&surface.root, x, y) {
+        for view in chain(&hit.view) {
+            let (id, listens) = {
+                let s = view.state();
+                (s.id, s.events.contains(EventKind::MouseMove))
+            };
+            if listens {
+                let (lx, ly) = local(surface, &view, x, y);
+                surface.event(
+                    id,
+                    EventKind::MouseMove,
+                    EventPayload::Map(vec![
+                        ("x", PayloadValue::Number(lx as f64)),
+                        ("y", PayloadValue::Number(ly as f64)),
+                    ]),
+                );
+            }
+        }
+    }
 }
 
 /// The scroll views under the mouse at `(x, y)` show their indicators.
