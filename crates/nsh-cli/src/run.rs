@@ -144,7 +144,9 @@ pub(crate) fn run(
         // bundle around it.
         Target::Linux => {
             let mut command = Command::new(&host);
-            command.args(&args);
+            command
+                .args(&args)
+                .args(["--app-id", &crate::package::app_id(entry)?]);
             run_local(&session, &mut command, "the Linux host")
         }
         // In place too: the AppKit host makes itself a regular app (menu
@@ -153,24 +155,28 @@ pub(crate) fn run(
             // The menu bar and the window show the app's name.
             let entry = entry.canonicalize()?;
             let config = crate::package::read_config(&entry).unwrap_or_default();
-            let (name, _) = crate::package::name_and_id(&entry, &config);
+            let (name, id) = crate::package::name_and_id(&entry, &config);
             let mut command = Command::new(&host);
             command
                 .args(&args)
-                .args(["--name", &name])
+                .args(["--name", &name, "--app-id", &id])
                 .args(["-ApplePersistenceIgnoreState", "YES"]);
             run_local(&session, &mut command, "the macOS host")
         }
         Target::Windows => {
             let mut command = Command::new(&host);
-            command.args(&args);
+            command
+                .args(&args)
+                .args(["--app-id", &crate::package::app_id(entry)?]);
             run_local(&session, &mut command, "the Windows host")
         }
         // In place on every OS: GPUI makes the process a regular app (on
         // macOS too) without an app bundle around it.
         Target::Gpui => {
             let mut command = Command::new(&host);
-            command.args(&args);
+            command
+                .args(&args)
+                .args(["--app-id", &crate::package::app_id(entry)?]);
             run_local(&session, &mut command, "the GPUI host")
         }
         Target::Ios => {
@@ -808,6 +814,27 @@ mod tests {
     use clap::ValueEnum as _;
 
     use super::Target;
+
+    /// The desktop hosts get each app's own id, so each keeps its own data.
+    #[test]
+    fn hosts_get_the_apps_id() {
+        let dir = std::env::temp_dir().join(format!("nsh-run-app-id-{}", std::process::id()));
+        let (named, unnamed) = (dir.join("named"), dir.join("Notes"));
+        for app in [&named, &unnamed] {
+            std::fs::create_dir_all(app).unwrap();
+            std::fs::write(app.join("App.tsx"), "").unwrap();
+        }
+        std::fs::write(named.join("nsh.json"), r#"{ "id": "com.acme.orders" }"#).unwrap();
+        assert_eq!(
+            crate::package::app_id(&named.join("App.tsx")).unwrap(),
+            "com.acme.orders"
+        );
+        assert_eq!(
+            crate::package::app_id(&unnamed.join("App.tsx")).unwrap(),
+            "com.example.notes"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn gpui_is_a_target_with_its_own_host() {

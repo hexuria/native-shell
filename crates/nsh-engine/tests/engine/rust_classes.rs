@@ -388,6 +388,8 @@ pub(crate) fn start(app: &str, ui_sets: Vec<Registry>) -> (Engine, Receiver<Moun
         limits: nsh_engine::Limits::default(),
         ui_sets,
         runtime: None,
+        data_dir: None,
+        storage: None,
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),
@@ -639,10 +641,10 @@ fn classes_a_signature_names_are_exported_with_it() {
 }
 
 const FRAMED: &str = r#"import { mount } from "nsh";
-import { createNativeValue } from "nsh/animated";
+import { createAnimatedValue } from "nsh/animated";
 import { Framed } from "test/classes";
 
-const v = createNativeValue(0.25);
+const v = createAnimatedValue(0.25);
 mount(() => (
   <Framed inner={[{ transform: [{ translateX: 7 }, { scale: 2 }] }, { shadowOffset: { width: 1, height: 2 }, opacity: v }]} />
 ));
@@ -653,7 +655,7 @@ fn a_style_prop_takes_what_a_host_elements_style_does() {
     let (_engine, rx) = start(FRAMED, vec![registry()]);
     let (_, items) = mounted(&rx, 500);
     // The transforms and the shadow offset (objects and arrays), and the
-    // native value bound to the inner view.
+    // animated value bound to the inner view.
     assert!(
         items.contains(
             "transform: [TransformOp { kind: TranslateX, value: 7.0 }, TransformOp { kind: Scale, value: 2.0 }]"

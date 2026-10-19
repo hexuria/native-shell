@@ -28,6 +28,8 @@ fn start(root: Root) -> (Engine, Receiver<MountBatch>) {
         limits: nsh_engine::Limits::default(),
         ui_sets: Vec::new(),
         runtime: None,
+        data_dir: None,
+        storage: None,
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),
@@ -316,6 +318,8 @@ fn start_js(app: &str) -> (Engine, Receiver<MountBatch>) {
         limits: nsh_engine::Limits::default(),
         ui_sets: vec![nsh_ui_mobile::registry()],
         runtime: None,
+        data_dir: None,
+        storage: None,
     };
     (
         Engine::start(config, || ApproxTextEngine, ChannelSink(tx)).unwrap(),
@@ -361,12 +365,11 @@ fn the_apps_handlers_on_a_list_views_rows_run() {
 fn Asker() -> impl IntoElement {
     let asked = signal(String::new());
     let stepper = component_ref::<Stepper>();
-    let asking = stepper.clone();
     view()
         .flex_1()
         .child(
             text(move || format!("asked {}", asked.get())).on_press(move |_: &()| {
-                let value = asking.api::<StepperApi>().map(|api| {
+                let value = stepper.api::<StepperApi>().map(|api| {
                     let value = api.value();
                     api.set_value(5.0);
                     value
