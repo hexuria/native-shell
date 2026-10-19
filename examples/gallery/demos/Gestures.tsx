@@ -4,6 +4,7 @@ import { Canvas } from "nsh/canvas";
 import { PanResponder } from "nsh/gesture";
 import { Image } from "nsh/image";
 import { Icon, type IconName } from "../icons";
+import { ContextMenus } from "./ContextMenus";
 import { alpha, Badge, Button, Caption, Card, colors, DemoPage, finish, hint, IconTile, isDark, mono, Press, radius, Row, Stat, tints } from "../ui";
 
 /** A dot matrix behind a stage, drawn once. */
@@ -452,5 +453,5 @@ function Accessibility() {
 }
 
 export function Gestures() {
-  return <DemoPage cards={[Transformable, Ball, TouchPad, PressEvents, HitSlop, PointerEvents, Accessibility]} />;
+  return <DemoPage cards={[ContextMenus, Transformable, Ball, TouchPad, PressEvents, HitSlop, PointerEvents, Accessibility]} />;
 }

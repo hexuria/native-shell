@@ -200,3 +200,35 @@ misses the deadline is not waited for again until it catches up (`docs/dev/macos
   edit, so a slow JS round trip can never overwrite newer typing (React Native's eventCount).
 
 Text, styles, scrolling and lists, animation, canvases and images have their own pages.
+
+### Checking context menus in the gallery
+
+Open **Gestures → Context menus** in `examples/gallery`. The card shows
+request and press counts, the chosen target, and the selected menu action.
+
+- Secondary-click the child: one request for **Child**. Choose **Inspect**
+  and check that the selection changes. Secondary-click the fallback area:
+  one request for **Parent**. On macOS, repeat with Control-click.
+- Secondary-click the disabled target: the request count stays unchanged.
+  Secondary-click the text field: its native editing menu remains available.
+- Long-press the child on touch: one request, with no ordinary press on
+  release. Move before the long-press deadline: no menu request. An ordinary
+  tap or click increments the press count.
+
+Native desktops use `Menu.popup`; mobile and web use `ActionSheet` so the
+same card exercises menu selection on every backend.
+
+The browser integration test drives the packaged gallery with real mouse
+and touch input through ChromeDriver. Serve a fresh web package, then run
+ChromeDriver and the test with temporary files outside any checkout:
+
+```sh
+mkdir -p "$HOME/.cache/nsh-test-tmp"
+TMPDIR="$HOME/.cache/nsh-test-tmp" chromedriver --port=9517
+# In another terminal, with the gallery served at the URL below:
+TMPDIR="$HOME/.cache/nsh-test-tmp" GALLERY_URL=http://127.0.0.1:8767/ \
+  WEBDRIVER_URL=http://127.0.0.1:9517 \
+  bun test website/tests/context-menu-gallery.test.ts
+```
+
+Without `GALLERY_URL`, the browser integration test is skipped.
