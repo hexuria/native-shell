@@ -95,9 +95,12 @@ misses the deadline is not waited for again until it catches up (`docs/dev/macos
   picked again after every batch (on macOS also after every scroll), so a view removed or moved from under a still mouse hears `onHoverOut` and one
   that arrives there `onHoverIn`; on Linux that waits for the next mouse move. Touches never hover. Other platforms do
   not raise them yet (iOS, Android, Windows and the web track `hover:` styles only).
-- **`onContextMenu`** (any element; macOS) fires on a right / secondary click: the innermost view under the point that
-  listens gets it (its ancestors get nothing — a click is one view's, unlike hover). The handler shows the menu itself,
-  `Menu.popup` of `nsh/desktop` — a hosted native view keeps its own menu. Other desktop platforms do not raise it yet.
+- **`onContextMenu`** requests an app context menu: a secondary click on macOS, Linux, Windows and GPUI,
+  Control-click on macOS, a browser context-menu request on the web, or a long press on iOS, Android and touch browsers.
+  Desktop picking delivers to the innermost listener; hosted native controls and text editing keep their menus.
+  Touch uses the innermost pressable view, honors `delayLongPress`, and suppresses the subsequent `onPress`;
+  `onLongPress` also fires when registered. A disabled view has no context-menu listener mounted.
+  The handler presents the menu (`Menu.popup` of `nsh/desktop` on native desktops, or app UI).
 - **`onPanEnd` / `onPanStart`** carry `valueX` / `valueY`: the bound pan values at that moment (a drag may grab a value mid
   animation), for snapping.
 - **Imperative calls**: nodes have `focus()`, `blur()` and `scrollTo({ x, y, animated })` (use `ref`); lists also

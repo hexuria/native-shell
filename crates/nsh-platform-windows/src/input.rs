@@ -735,6 +735,7 @@ fn has_press(events: EventMask) -> bool {
     [
         EventKind::Press,
         EventKind::LongPress,
+        EventKind::ContextMenu,
         EventKind::PressIn,
         EventKind::PressOut,
     ]
@@ -808,6 +809,9 @@ fn context_menu(surface: &Rc<Surface>, x: f32, y: f32) {
     let Some(hit) = pick(&surface.root, x, y, true) else {
         return;
     };
+    if hit.item.is_some() {
+        return;
+    }
     let mut view = Some(hit.view);
     while let Some(v) = view {
         let (input, selectable) = {
@@ -820,6 +824,11 @@ fn context_menu(surface: &Rc<Surface>, x: f32, y: f32) {
         }
         if selectable {
             crate::text::context_menu(surface, &v);
+            return;
+        }
+        if v.state().events.contains(EventKind::ContextMenu) {
+            let id = v.state().id;
+            surface.event(id, EventKind::ContextMenu, EventPayload::None);
             return;
         }
         view = v.parent_view();
@@ -1456,13 +1465,20 @@ fn down(
         } else {
             press_in(surface, press);
         }
-        if press.events.contains(EventKind::LongPress) {
+        if press.events.contains(EventKind::LongPress)
+            || (key != Key::Mouse && press.events.contains(EventKind::ContextMenu))
+        {
             let delay = press.long_delay.max(0.0) as u64;
             after(surface, key, generation, delay, |surface, p| {
                 let Some(press) = &mut p.press else { return };
                 press_in(surface, press);
                 press.long = true;
-                press_event(surface, press.node, EventKind::LongPress);
+                if press.events.contains(EventKind::LongPress) {
+                    press_event(surface, press.node, EventKind::LongPress);
+                }
+                if p.key != Key::Mouse && press.events.contains(EventKind::ContextMenu) {
+                    press_event(surface, press.node, EventKind::ContextMenu);
+                }
             });
         }
     }

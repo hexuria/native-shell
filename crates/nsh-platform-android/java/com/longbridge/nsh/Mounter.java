@@ -246,9 +246,19 @@ final class Mounter {
                         ((Box) v).events = mask;
                         v.setClickable((mask & (1L << Native.PRESS)) != 0);
                     }
-                    if (v instanceof ScrollBox) ((ScrollBox) v).events = mask;
+                    if (v instanceof ScrollBox) {
+                        ScrollBox scroll = (ScrollBox) v;
+                        scroll.events = mask;
+                        scroll.content.events = mask & (1L << Native.CONTEXT_MENU);
+                    }
+                    if (!(v instanceof InputBox) && !(v instanceof WebBox)) {
+                        v.setOnContextClickListener((mask & (1L << Native.CONTEXT_MENU)) == 0 ? null : target -> {
+                            event(id, Native.CONTEXT_MENU);
+                            return true;
+                        });
+                    }
                     boolean presses = (mask & ((1L << Native.PRESS) | (1L << Native.LONG_PRESS)
-                            | (1L << Native.PRESS_IN) | (1L << Native.PRESS_OUT))) != 0;
+                            | (1L << Native.PRESS_IN) | (1L << Native.PRESS_OUT) | (1L << Native.CONTEXT_MENU))) != 0;
                     if (v instanceof TextBox && presses && ((TextBox) v).press == null) {
                         ((TextBox) v).press = new Pressable(v, this, id);
                     }

@@ -7680,3 +7680,45 @@ fn file_drop_callbacks_keep_urls_and_disabled_targets_unmount_their_events() {
         assert!(!events.contains(event));
     }
 }
+
+#[test]
+fn context_menu_preserves_android_event_numbers() {
+    let java = include_str!("../../../nsh-platform-android/java/com/longbridge/nsh/Native.java");
+    for (name, kind) in [
+        ("FILE_DRAG_ENTER", EventKind::FileDragEnter),
+        ("FILE_DRAG_LEAVE", EventKind::FileDragLeave),
+        ("FILE_DROP", EventKind::FileDrop),
+        ("CONTEXT_MENU", EventKind::ContextMenu),
+    ] {
+        assert!(java.contains(&format!("static final int {name} = {};", kind as u8)));
+    }
+}
+
+#[test]
+fn context_menu_callback_and_disabled_mask() {
+    use crate::ui::prelude::*;
+    #[component]
+    fn ContextView() -> impl IntoElement {
+        let disabled = signal(false);
+        view()
+            .disabled(move || disabled.get())
+            .on_context_menu(move |_: &()| disabled.set(true))
+    }
+    let mut c = core();
+    c.mount_root(&crate::ui::Root::of::<ContextView>());
+    let batch = c.commit().unwrap();
+    let host = batch
+        .items
+        .iter()
+        .find_map(|item| match item {
+            MountItem::Events { id, events } if events.contains(EventKind::ContextMenu) => {
+                Some(*id)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(c.component_event(host, EventKind::ContextMenu, &EventPayload::None));
+    let batch = c.commit().unwrap();
+    assert!(batch.items.iter().any(|item| matches!(item,
+        MountItem::Events { id, events } if *id == host && !events.contains(EventKind::ContextMenu))));
+}

@@ -64,6 +64,7 @@ final class Native {
     static final int FILE_DRAG_ENTER = 53;
     static final int FILE_DRAG_LEAVE = 54;
     static final int FILE_DROP = 55;
+    static final int CONTEXT_MENU = 56;
 
     static native long create(NshView view, float density, boolean trace);
 

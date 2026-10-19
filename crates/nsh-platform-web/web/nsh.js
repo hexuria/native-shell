@@ -29,7 +29,7 @@ const ROOT_ID = 1;
 const PRESSED = 1;
 const HOVERED = 2;
 const FOCUSED = 4;
-const PRESS_EVENTS = ["onPress", "onLongPress", "onPressIn", "onPressOut"];
+const PRESS_EVENTS = ["onPress", "onLongPress", "onContextMenu", "onPressIn", "onPressOut"];
 /** `accessibilityRole`s whose ARIA role has another name; others are the same. */
 const ARIA_ROLES = {
   none: null, header: "heading", image: "img", imagebutton: "button", keyboardkey: "button", adjustable: "slider",
@@ -3446,7 +3446,7 @@ class Player {
     });
     // No page menu over the app (nor iOS's callout on a long press); fields
     // and selectable text keep theirs.
-    root.addEventListener("contextmenu", (e) => this.editable(e.target) || e.preventDefault());
+    root.addEventListener("contextmenu", (e) => this.contextMenu(e));
     root.addEventListener("copy", (e) => this.copyText(e));
     root.addEventListener("wheel", (e) => this.wheel(e), { passive: false });
     // Safari's touchpad pinches (it sends no ctrl+wheel).
@@ -3477,6 +3477,24 @@ class Player {
     if (this.history) this.installHistory();
   }
 
+  contextMenu(e) {
+    if (this.editable(e.target)) return;
+    e.preventDefault();
+    const view = this.ancestors(e.target).find((v) => v._events.has("onContextMenu"));
+    if (!view) return;
+    // The browser may request the same menu after our touch timer fired.
+    if (this.contextPress === view._id) {
+      this.contextPress = null;
+      return;
+    }
+    for (const p of this.pointers.values()) {
+      if (p.press !== view) continue;
+      clearTimeout(p.longTimer);
+      p.long = true;
+    }
+    this.event(view._id, "onContextMenu");
+  }
+
   /** Whether the browser handles presses at `target` itself: fields,
    * selectable text, hosted pages and videos. */
   editable(target) {
@@ -3502,6 +3520,7 @@ class Player {
   // Keyboard
 
   keyDown(e) {
+    this.contextPress = null;
     if (!this.wasm || !this.takesKeys()) return;
     const focus = document.activeElement;
     const inRoot = focus && this.root.contains(focus);
@@ -3848,6 +3867,7 @@ class Player {
 
   pointerDown(e) {
     this.lastPointer = e.pointerType;
+    this.contextPress = null;
     Player.active = this;
     if (e.button > 0) return;
     if (e.pointerType === "mouse" && this.desktopUI && this.grabBar(e)) return;
@@ -3872,6 +3892,8 @@ class Player {
     const scrollView = isField ? null : chain.find((v) => v._kind === "scroll") ?? null;
     const p = {
       x, y, startX: x, startY: y, t: performance.now(), vx: 0, vy: 0,
+      touch: e.pointerType === "touch",
+
       touchPath: chain.filter((v) => v._events.has("onTouch")).map((v) => v._id),
       press: isField ? null : chain.find((v) => PRESS_EVENTS.some((n) => v._events.has(n)) && !v._props?.disabled) ?? null,
       pan: chain.find((v) => v._gestures?.pan || v._events.has("onPanStart") || v._events.has("onPanEnd")) ?? null,
@@ -3900,10 +3922,15 @@ class Player {
     const opacity = el._props?.activeOpacity;
     if (opacity != null && opacity < 1) this.pressFade(el, opacity);
     if (el._events.has("onPressIn")) this.event(el._id, "onPressIn");
-    if (el._events.has("onLongPress")) {
+    const context = p.touch && el._events.has("onContextMenu");
+    if (el._events.has("onLongPress") || context) {
       p.longTimer = setTimeout(() => {
         p.long = true;
-        this.event(el._id, "onLongPress");
+        if (el._events.has("onLongPress")) this.event(el._id, "onLongPress");
+        if (context) {
+          this.contextPress = el._id;
+          this.event(el._id, "onContextMenu");
+        }
       }, el._props?.longPressDelay ?? 500);
     }
   }

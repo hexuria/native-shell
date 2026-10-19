@@ -79,7 +79,7 @@ define_class!(
                 return self.set_state(UIGestureRecognizerState::Failed);
             }
             let long_press = match link {
-                Some(l) => l.events.contains(EventKind::LongPress),
+                Some(l) => l.events.contains(EventKind::LongPress) || l.events.contains(EventKind::ContextMenu),
                 None => ivars.long_press.get(),
             };
             ivars.start.set(touch.locationInView(Some(&view)));
@@ -237,6 +237,10 @@ impl PressRecognizer {
                 Report::PressOut => EventKind::PressOut,
                 Report::LongPress => EventKind::LongPress,
             };
+            if matches!(&report, Report::LongPress) && link.events.contains(EventKind::ContextMenu)
+            {
+                target.link_event(&link, EventKind::ContextMenu);
+            }
             return target.link_event(&link, kind);
         }
         let Some(view) = self.view() else { return };

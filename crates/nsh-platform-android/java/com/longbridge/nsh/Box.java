@@ -353,7 +353,7 @@ class Box extends ViewGroup implements Node {
     }
 
     private boolean pressable() {
-        return wants(Native.PRESS) || wants(Native.LONG_PRESS) || wants(Native.PRESS_IN)
+        return wants(Native.PRESS) || wants(Native.LONG_PRESS) || wants(Native.CONTEXT_MENU) || wants(Native.PRESS_IN)
                 || wants(Native.PRESS_OUT) || mounter.hasPressFeedback(id);
     }
 
@@ -370,7 +370,8 @@ class Box extends ViewGroup implements Node {
         if (tracking && !panning) {
             if (!pressedIn) onPressIn();
             longPressed = true;
-            mounter.event(id, Native.LONG_PRESS);
+            if (wants(Native.LONG_PRESS)) mounter.event(id, Native.LONG_PRESS);
+            if (wants(Native.CONTEXT_MENU)) mounter.event(id, Native.CONTEXT_MENU);
         }
     }
 
@@ -473,7 +474,7 @@ class Box extends ViewGroup implements Node {
                 if (pressable) {
                     if (insideScrollView()) postDelayed(pressIn, ViewConfiguration.getTapTimeout());
                     else onPressIn();
-                    if (wants(Native.LONG_PRESS)) postDelayed(longPress, mounter.longPressDelay(id));
+                    if (wants(Native.LONG_PRESS) || wants(Native.CONTEXT_MENU)) postDelayed(longPress, mounter.longPressDelay(id));
                 }
                 return true;
             case MotionEvent.ACTION_POINTER_DOWN:

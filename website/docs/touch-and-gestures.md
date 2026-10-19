@@ -43,6 +43,7 @@ mount(App);
 |---|---|---|---|
 | `onPress` | `() => void` | | The finger lifted inside the view (after a press, not a long press). |
 | `onLongPress` | `() => void` | | The finger stayed down for `delayLongPress`. `onPress` does not follow. |
+| `onContextMenu` | `() => void` | | A secondary click on desktop or a long press on touch requests an app menu. The handler presents the menu; native text controls keep their editing menus. |
 | `onPressIn` | `() => void` | | The press started. |
 | `onPressOut` | `() => void` | | The press ended: lifted, slid off, or taken over by a scroll view. |
 | `delayLongPress` | `number` | `500` | Milliseconds before a press becomes a long press. |

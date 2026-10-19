@@ -395,7 +395,7 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
         EventKind::ContextMenu,
         on::ALL,
         "() => void",
-        "The view was right-clicked / secondary-clicked (desktops): show a menu, e.g. `Menu.popup` of `nsh/desktop`.",
+        "A secondary click (desktop) or a long press (touch) requested a context menu. The handler presents the menu.",
     ),
     (
         EventKind::FileDragEnter,

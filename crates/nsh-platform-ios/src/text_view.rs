@@ -564,9 +564,10 @@ impl TextView {
     /// Whether a pressable span listens to long presses.
     pub(crate) fn links_long_press(&self) -> bool {
         self.ivars().text.borrow().as_ref().is_some_and(|t| {
-            t.links
-                .iter()
-                .any(|l| l.events.contains(nsh_core::EventKind::LongPress))
+            t.links.iter().any(|l| {
+                l.events.contains(nsh_core::EventKind::LongPress)
+                    || l.events.contains(nsh_core::EventKind::ContextMenu)
+            })
         })
     }
 

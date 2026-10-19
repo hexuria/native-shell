@@ -174,10 +174,10 @@ events! {
     Menu = "onMenu": "A menu item was chosen: the application menu's or a context menu's (root only; desktops; payload: `id`), or a context menu closed (`closed`: true, after its item).",
     HoverIn = "onHoverIn": "The mouse came over the view or a view inside it (desktop backends that track the pointer; never on touches).",
     HoverOut = "onHoverOut": "The mouse left the view and the views inside it, or the window (desktop backends that track the pointer).",
-    ContextMenu = "onContextMenu": "The view was right-clicked / secondary-clicked (desktops): show a menu, e.g. `Menu.popup` of `nsh/desktop`.",
     FileDragEnter = "onFileDragEnter": "A local file drag entered an eligible desktop drop destination.",
     FileDragLeave = "onFileDragLeave": "A local file drag left its desktop drop destination.",
     FileDrop = "onFileDrop": "Local files were dropped (payload: [`EventPayload::FileDrop`]).",
+    ContextMenu = "onContextMenu": "A secondary click (desktop) or a long press (touch) requested a context menu. The handler presents the menu.",
 }
 
 /// What an input holds, for the system's autofill and suggestions

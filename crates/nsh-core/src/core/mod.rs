@@ -4605,7 +4605,8 @@ fn directed_align(align: TextAlign, rtl: bool) -> TextAlign {
 }
 
 /// The press events.
-const PRESSES: [EventKind; 4] = [
+const PRESSES: [EventKind; 5] = [
+    EventKind::ContextMenu,
     EventKind::Press,
     EventKind::LongPress,
     EventKind::PressIn,

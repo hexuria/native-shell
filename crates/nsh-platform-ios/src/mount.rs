@@ -1957,6 +1957,7 @@ impl Mounter {
         let own_press = any(&[
             EventKind::Press,
             EventKind::LongPress,
+            EventKind::ContextMenu,
             EventKind::PressIn,
             EventKind::PressOut,
         ]) || slot.active_opacity.is_some()
@@ -2010,7 +2011,11 @@ impl Mounter {
             });
         }
         if let Some(press) = &g.press {
-            press.set_long_press(events.contains(EventKind::LongPress) || links_long_press);
+            press.set_long_press(
+                events.contains(EventKind::LongPress)
+                    || events.contains(EventKind::ContextMenu)
+                    || links_long_press,
+            );
             press.set_own(own_press);
             press.set_long_press_delay(slot.long_press_delay);
         }
@@ -2481,6 +2486,12 @@ impl Mounter {
 
     /// A press was held for half a second.
     pub(crate) fn long_pressed(&mut self, id: NodeId) {
+        if let Some(s) = self.slot(id)
+            && s.events.contains(EventKind::ContextMenu)
+        {
+            self.control
+                .dispatch_event(id, EventKind::ContextMenu, EventPayload::None);
+        }
         if let Some(s) = self.slot(id)
             && s.events.contains(EventKind::LongPress)
         {

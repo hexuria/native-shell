@@ -33,7 +33,7 @@ final class Pressable {
 
     /** The view itself takes presses. */
     boolean ownWanted() {
-        return mounter.wants(id, Native.PRESS) || mounter.wants(id, Native.LONG_PRESS)
+        return mounter.wants(id, Native.PRESS) || mounter.wants(id, Native.LONG_PRESS) || mounter.wants(id, Native.CONTEXT_MENU)
                 || mounter.wants(id, Native.PRESS_IN) || mounter.wants(id, Native.PRESS_OUT)
                 || mounter.hasPressFeedback(id);
     }
@@ -67,7 +67,7 @@ final class Pressable {
                 longPressed = false;
                 if (insideScrollView()) view.postDelayed(pressIn, ViewConfiguration.getTapTimeout());
                 else pressIn();
-                if (wants(Native.LONG_PRESS)) view.postDelayed(longPress, span ? ViewConfiguration.getLongPressTimeout() : mounter.longPressDelay(id));
+                if (wants(Native.LONG_PRESS) || wants(Native.CONTEXT_MENU)) view.postDelayed(longPress, span ? ViewConfiguration.getLongPressTimeout() : mounter.longPressDelay(id));
                 return true;
             case MotionEvent.ACTION_MOVE: {
                 float slop = ViewConfiguration.get(view.getContext()).getScaledTouchSlop();
@@ -123,6 +123,7 @@ final class Pressable {
         if (!pressedIn) pressIn();
         longPressed = true;
         event(Native.LONG_PRESS);
+        event(Native.CONTEXT_MENU);
     }
 
     private boolean insideScrollView() {

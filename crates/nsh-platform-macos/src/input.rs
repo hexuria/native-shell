@@ -602,6 +602,13 @@ pub(crate) fn event(surface: &Rc<Surface>, event: &NSEvent) {
     let input = &surface.input;
     match ty {
         NSEventType::LeftMouseDown => {
+            if event
+                .modifierFlags()
+                .contains(NSEventModifierFlags::Control)
+            {
+                context_menu(surface, x, y);
+                return;
+            }
             // A title bar of the app's own moves the window.
             if crate::chrome::mouse_down(surface, event, x, y) {
                 return;

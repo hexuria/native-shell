@@ -43,6 +43,7 @@ mount(App);
 |---|---|---|---|
 | `onPress` | `() => void` | | 手指在视图内抬起（普通按压，不是长按）。 |
 | `onLongPress` | `() => void` | | 手指按住达到 `delayLongPress`。之后不会再触发 `onPress`。 |
+| `onContextMenu` | `() => void` | | 桌面端右键或触摸端长按时请求应用菜单，由处理函数展示。原生文本控件保留编辑菜单。 |
 | `onPressIn` | `() => void` | | 按压开始。 |
 | `onPressOut` | `() => void` | | 按压结束：抬起、滑出，或被滚动视图接管。 |
 | `delayLongPress` | `number` | `500` | 按压变为长按前的毫秒数。 |

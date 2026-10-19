@@ -860,6 +860,14 @@ pub trait Interactive: Element {
         )
     }
 
+    /// Presents an app context menu after a secondary click or touch long press.
+    fn on_context_menu(self, listener: impl Into<Listener<()>>) -> Self {
+        self.on(
+            EventKind::ContextMenu,
+            events::typed(listener.into(), events::unit),
+        )
+    }
+
     /// Handles presses held for about half a second.
     fn on_long_press(self, listener: impl Into<Listener<()>>) -> Self {
         self.on(

@@ -748,6 +748,7 @@ fn has_press(events: EventMask) -> bool {
     [
         EventKind::Press,
         EventKind::LongPress,
+        EventKind::ContextMenu,
         EventKind::PressIn,
         EventKind::PressOut,
     ]
@@ -896,6 +897,9 @@ fn context_menu(surface: &Rc<Surface>, x: f32, y: f32) {
     let Some(hit) = pick(&surface.root, x, y, true) else {
         return;
     };
+    if hit.item.is_some() {
+        return;
+    }
     let mut view = Some(hit.view);
     while let Some(v) = view {
         let (input, selectable) = {
@@ -908,6 +912,11 @@ fn context_menu(surface: &Rc<Surface>, x: f32, y: f32) {
         }
         if selectable {
             crate::text::context_menu(surface, &v);
+            return;
+        }
+        if v.state().events.contains(EventKind::ContextMenu) {
+            let id = v.state().id;
+            surface.event(id, EventKind::ContextMenu, EventPayload::None);
             return;
         }
         view = v.parent_view();
@@ -928,7 +937,10 @@ pub(crate) fn pointer(surface: &Rc<Surface>, event: PointerEvent) {
     let mouse = key == Key::Mouse;
     match event.kind {
         PointerKind::Down => {
-            if mouse && event.button == 1 {
+            if mouse
+                && (event.button == 1
+                    || (cfg!(target_os = "macos") && event.button == 0 && event.modifiers.ctrl))
+            {
                 context_menu(surface, x, y);
                 return;
             }
@@ -1485,13 +1497,20 @@ fn down(
         } else {
             press_in(surface, press);
         }
-        if press.events.contains(EventKind::LongPress) {
+        if press.events.contains(EventKind::LongPress)
+            || (key != Key::Mouse && press.events.contains(EventKind::ContextMenu))
+        {
             let delay = press.long_delay.max(0.0) as u64;
             after(surface, key, generation, delay, |surface, p| {
                 let Some(press) = &mut p.press else { return };
                 press_in(surface, press);
                 press.long = true;
-                press_event(surface, press.node, EventKind::LongPress);
+                if press.events.contains(EventKind::LongPress) {
+                    press_event(surface, press.node, EventKind::LongPress);
+                }
+                if p.key != Key::Mouse && press.events.contains(EventKind::ContextMenu) {
+                    press_event(surface, press.node, EventKind::ContextMenu);
+                }
             });
         }
     }
@@ -2175,7 +2194,10 @@ fn hover(surface: &Rc<Surface>, x: f32, y: f32, modifiers: Modifiers) {
     let hit = pick(&surface.root, x, y, true);
     // The scroll views under the mouse show their indicators.
     if let Some(hit) = &hit {
-        for v in chain(&hit.view).iter().filter(|v| v.kind() == ViewKind::Scroll) {
+        for v in chain(&hit.view)
+            .iter()
+            .filter(|v| v.kind() == ViewKind::Scroll)
+        {
             crate::scroll::hovered(surface, v);
         }
     }

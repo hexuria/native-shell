@@ -521,6 +521,7 @@ fn has_press(events: EventMask) -> bool {
     [
         EventKind::Press,
         EventKind::LongPress,
+        EventKind::ContextMenu,
         EventKind::PressIn,
         EventKind::PressOut,
     ]
@@ -637,6 +638,11 @@ fn dispatch(surface: &Rc<Surface>, event: &gdk::Event) -> glib::Propagation {
         // On a view that drags the window: the window's, not the app's.
         T::ButtonPress if crate::chrome::press(surface, event, x, y) => {
             return glib::Propagation::Stop;
+        }
+        T::ButtonPress if button() == Some(gdk::BUTTON_SECONDARY) => {
+            if context_menu(surface, x, y) {
+                return glib::Propagation::Stop;
+            }
         }
         T::ButtonPress if button() == Some(gdk::BUTTON_PRIMARY) => {
             down(surface, Key::Mouse, x, y, time)
@@ -1151,13 +1157,20 @@ fn down(surface: &Rc<Surface>, key: Key, x: f32, y: f32, time: f64) {
         } else {
             press_in(surface, press);
         }
-        if press.events.contains(EventKind::LongPress) {
+        if press.events.contains(EventKind::LongPress)
+            || (key != Key::Mouse && press.events.contains(EventKind::ContextMenu))
+        {
             let delay = press.long_delay.max(0.0) as u64;
             after(surface, key, generation, delay, |surface, p| {
                 let Some(press) = &mut p.press else { return };
                 press_in(surface, press);
                 press.long = true;
-                press_event(surface, press.node, EventKind::LongPress);
+                if press.events.contains(EventKind::LongPress) {
+                    press_event(surface, press.node, EventKind::LongPress);
+                }
+                if p.key != Key::Mouse && press.events.contains(EventKind::ContextMenu) {
+                    press_event(surface, press.node, EventKind::ContextMenu);
+                }
             });
         }
     }
@@ -2095,6 +2108,24 @@ pub(crate) fn file_drop_target(surface: &Surface, x: f32, y: f32) -> Option<NshV
         }
         view = view.parent_view()?;
     }
+}
+
+// Hosted widgets keep their native editing and page menus.
+fn context_menu(surface: &Rc<Surface>, x: f32, y: f32) -> bool {
+    let Some(hit) = pick(&surface.root, x, y) else {
+        return false;
+    };
+    if hit.native.is_some() {
+        return false;
+    }
+    for view in chain(&hit.view) {
+        let state = view.state();
+        if state.events.contains(EventKind::ContextMenu) {
+            surface.event(state.id, EventKind::ContextMenu, EventPayload::None);
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
