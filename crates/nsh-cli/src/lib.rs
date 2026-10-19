@@ -545,9 +545,11 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             run::HostFlags { trace, fps },
             target,
             device.as_deref(),
-            name.as_deref(),
-            size.as_deref(),
-            script.as_deref(),
+            run::HostWindow {
+                name: name.as_deref(),
+                size: size.as_deref(),
+                script: script.as_deref(),
+            },
         ),
         Command::Keygen { name } => sign::keygen(&name),
         Command::Certify {
