@@ -229,3 +229,9 @@ shots of macOS and Windows.
 
 The host chooses window bounds and level when opening a GPUI window.
 `Window.setFrame` and `Window.setLevel` commands leave those host settings intact.
+
+`Window.orderFront` activates a standalone window through a main-thread
+window update, including while it is minimized and no frames are drawn. macOS
+restores miniaturized windows before activation; Windows restores minimized
+windows through GPUI. Linux window managers decide whether to grant activation.
+Embedded views leave window activation to their host.

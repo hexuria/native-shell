@@ -53,6 +53,7 @@ gpui = { package = "gpui-fast", version = "0.1.9", default-features = false, fea
 gpui_platform = { package = "gpui-fast-platform", version = "0.1.9", default-features = false, features = ["font-kit", "wayland", "x11"] }
 # Script shots on Linux: the window read from the X server.
 raw-window-handle = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSView", "NSWindow", "NSResponder"] }
 x11rb = { version = "0.13", default-features = false, features = ["dri3", "present"] }
 # The canvas rasterizer (already in GPUI's tree through resvg).
 tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }

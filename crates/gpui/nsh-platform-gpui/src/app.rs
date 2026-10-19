@@ -658,7 +658,7 @@ pub fn open_app_window(
     let handle = cx.open_window(window_options, move |window, cx| {
         let title = options.title.clone();
         let view: Entity<AppView> = cx.new(|cx| AppView::new(options, window, cx));
-        crate::chrome::set_standalone(view.read(cx).surface(), &title);
+        crate::chrome::set_standalone(view.read(cx).surface(), &title, window.window_handle());
         match source {
             AppSource::Rust(root) => view.read(cx).load(App::Rust(root)),
             AppSource::Bundle(bundle) => view.read(cx).load(App::Js(bundle)),

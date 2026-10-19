@@ -84,8 +84,8 @@ impl Window {
     }
 
     /// Brings the window to the front of its level and focuses it (the app
-    /// activates). The level does not change: a normal window does not
-    /// start floating, a desktop-level surface stays behind windows.
+    /// activates). The window keeps its level. On macOS, desktop-level
+    /// surfaces stay behind other windows.
     pub(crate) fn order_front(cx: &mut ModuleCx) {
         desktop(cx, DesktopCommand::OrderFront);
     }
