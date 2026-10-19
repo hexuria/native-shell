@@ -152,6 +152,10 @@ pub(crate) struct Chrome {
     /// The title bar's own height, before an app's height replaced it:
     /// without one, the controls go back there.
     natural: Cell<Option<f32>>,
+    /// The traffic lights' natural layout (close's x and the gaps between
+    /// them), captured with `natural`: a taller bar insets the row the same
+    /// both ways, and at the natural height they go back exactly.
+    natural_lights: RefCell<Option<(f64, Vec<f64>)>>,
 }
 
 impl Drop for Chrome {
@@ -280,6 +284,11 @@ fn center_traffic_lights_once(surface: &Surface, window: &NSWindow, height: f32)
         let natural = &surface.chrome.natural;
         if natural.get().is_none() {
             natural.set(Some(container.frame().size.height as f32));
+            let xs: Vec<f64> = buttons.iter().flatten().map(|b| b.frame().origin.x).collect();
+            if let Some(&x0) = xs.first() {
+                *surface.chrome.natural_lights.borrow_mut() =
+                    Some((x0, xs.iter().map(|x| x - x0).collect()));
+            }
         }
         let height = f64::from(height);
         let mut frame = container.frame();
@@ -288,12 +297,22 @@ fn center_traffic_lights_once(surface: &Surface, window: &NSWindow, height: f32)
         if container.frame() != frame {
             container.setFrame(frame);
         }
-        for button in buttons.iter().flatten() {
+        for (i, button) in buttons.iter().flatten().enumerate() {
             let f = button.frame();
             // The title bar view is not flipped: y goes up.
             let y = ((height - f.size.height) / 2.0).round();
-            if f.origin.y != y {
-                button.setFrameOrigin(NSPoint::new(f.origin.x, y));
+            // The inset is the same both ways: at the natural height the
+            // row is AppKit's own (9, 32, 55); a taller bar holds the
+            // lights off the corner, a shorter one keeps them put.
+            let x = match &*surface.chrome.natural_lights.borrow() {
+                Some((x0, gaps)) => {
+                    let ny = (f64::from(natural.get().unwrap_or(height as f32)) - f.size.height) / 2.0;
+                    y.max(ny) + x0 - ny + gaps.get(i).copied().unwrap_or(0.0)
+                }
+                None => f.origin.x,
+            };
+            if f.origin.y != y || f.origin.x != x {
+                button.setFrameOrigin(NSPoint::new(x, y));
             }
         }
     }
