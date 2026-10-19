@@ -641,11 +641,11 @@ pub(crate) fn event(surface: &Rc<Surface>, event: &NSEvent) {
         NSEventType::OtherMouseDown if event.buttonNumber() == BACK_BUTTON => {
             crate::navigation::go_back(surface);
         }
+        NSEventType::RightMouseDown => context_menu(surface, x, y),
         NSEventType::ScrollWheel => scroll_event(surface, event, x, y, time),
         NSEventType::Magnify => magnify(surface, event, x, y),
         NSEventType::Rotate => rotate(surface, event, x, y),
-        // Right and other buttons do nothing (no context menus), as on
-        // Linux.
+        // Other buttons do nothing, as on Linux.
         _ => {}
     }
 }
@@ -1523,6 +1523,25 @@ fn press_out(surface: &Rc<Surface>, press: &mut Press, fire: bool) {
 fn press_event(surface: &Surface, node: NodeId, kind: EventKind) {
     log::debug!(target: "nsh::input", "{} on {node}", kind.prop_name());
     surface.event(node, kind, EventPayload::None);
+}
+
+/// A secondary click at `(x, y)`: the innermost view listening to
+/// `onContextMenu` gets it (its JS shows a menu, `Menu.popup` of
+/// `nsh/desktop`); a hosted native view keeps its own menu.
+fn context_menu(surface: &Rc<Surface>, x: f32, y: f32) {
+    let Some(hit) = pick(&surface.root, x, y) else {
+        return;
+    };
+    if hit.native {
+        return;
+    }
+    if let Some(view) = chain(&hit.view)
+        .into_iter()
+        .find(|v| v.state().events.contains(EventKind::ContextMenu))
+    {
+        let node = view.state().id;
+        press_event(surface, node, EventKind::ContextMenu);
+    }
 }
 
 fn cancel_press(surface: &Rc<Surface>, p: &mut Pointer) {
