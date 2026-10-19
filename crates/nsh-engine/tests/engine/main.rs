@@ -19,6 +19,7 @@ mod components;
 mod counter;
 mod errors;
 mod fetch;
+mod handle_bench;
 mod hot;
 mod hover;
 mod js_touch;
@@ -37,6 +38,7 @@ mod rust_styles;
 mod rust_touch;
 mod shutdown;
 mod split;
+mod storage;
 mod theme;
 
 /// Hands the engine's batches to the test.
