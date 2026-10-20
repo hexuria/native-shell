@@ -74,6 +74,12 @@ pub struct AppOptions {
     /// Where bundled assets are (for [`AppSource::Bundle`]); dev servers
     /// serve them themselves.
     pub asset_base: Option<AssetBase>,
+    /// The directory `import()` loads a chunk from: the `.js` files `nsh
+    /// build --split` writes (each named after its chunk id), or a
+    /// directory the app keeps its own delivered modules in. Chunks load
+    /// as source (`Bundle::read`); `None` fails an `import()` the bundle
+    /// does not already hold.
+    pub chunks: Option<PathBuf>,
     /// The application id (`com.example.app`).
     pub app_id: String,
     /// The window title.
@@ -119,6 +125,7 @@ impl Default for AppOptions {
         AppOptions {
             trace: false,
             asset_base: None,
+            chunks: None,
             app_id: "com.longbridge.nsh.host".to_owned(),
             title: "nsh".to_owned(),
             size: (1200, 800),
@@ -243,6 +250,7 @@ impl AppView {
             clock: Default::default(),
         };
         crate::image::set_asset_base(&self.surface, options.asset_base.clone());
+        *self.surface.chunks.borrow_mut() = options.chunks.clone();
         self.surface
             .native
             .set_asset_base(options.asset_base.clone());

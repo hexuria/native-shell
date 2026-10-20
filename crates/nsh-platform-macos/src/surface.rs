@@ -21,6 +21,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    path::PathBuf,
     rc::{Rc, Weak},
     sync::{
         Arc,
@@ -32,7 +33,9 @@ use std::{
 use crossbeam_channel::{Receiver, Sender};
 use dispatch2::DispatchQueue;
 use nsh_core::{EventKind, EventPayload, MountBatch, MountItem, NodeId, Points, ROOT_ID, Size};
-use nsh_engine::{Engine, EngineConfig, EngineControl, Environment, MountSink, perf::PerfMonitor};
+use nsh_engine::{
+    Chunk, Engine, EngineConfig, EngineControl, Environment, MountSink, perf::PerfMonitor,
+};
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained, sel,
 };
@@ -52,6 +55,9 @@ enum Message {
     HotUpdateFailed,
     /// The engine laid the app out at this size ([`MountSink::resized`]).
     Resized(Size<Points>),
+    /// The app imports chunk `id` (`import()` of a split bundle), which its
+    /// bundle does not hold ([`MountSink::load_chunk`]).
+    LoadChunk(String),
 }
 
 /// How long the main thread waits for the layout at a new window size
@@ -79,6 +85,8 @@ struct Sink {
     pending: Arc<AtomicBool>,
     /// A performance monitor measures: batches carry when they were sent.
     perf: Arc<AtomicBool>,
+    /// The directory `import()` chunks load from ([`AppOptions::chunks`]).
+    chunks: Option<PathBuf>,
 }
 
 impl Sink {
@@ -115,6 +123,14 @@ impl MountSink for Sink {
 
     fn resized(&self, size: Size<Points>) {
         self.send(Message::Resized(size));
+    }
+
+    fn load_chunk(&self, id: &str) -> bool {
+        if self.chunks.is_none() {
+            return false;
+        }
+        self.send(Message::LoadChunk(id.to_owned()));
+        true
     }
 }
 
@@ -167,6 +183,8 @@ pub(crate) struct Surface {
     /// The app's appearance (`nsh.json`, `setColorScheme`): the color
     /// scheme is the system's resolved with it ([`crate::system`]).
     pub(crate) appearance: Cell<nsh_core::platform::Appearance>,
+    /// The directory `import()` chunks load from ([`crate::AppOptions::chunks`]).
+    pub(crate) chunks: RefCell<Option<PathBuf>>,
     /// The embedding app's locale and text size, standing in for the
     /// system's ([`crate::AppView::set_locale`], `set_font_scale`).
     pub(crate) host_environment: Cell<nsh_core::platform::HostEnvironment>,
@@ -227,6 +245,7 @@ impl Surface {
             pending: RefCell::new(Arc::new(AtomicBool::new(false))),
             environment: Cell::new(environment),
             appearance: Cell::default(),
+            chunks: RefCell::new(None),
             host_environment: Cell::default(),
             js_frame: Cell::new(false),
             frame_callbacks: RefCell::default(),
@@ -279,6 +298,7 @@ impl Surface {
             tx,
             pending: pending.clone(),
             perf: self.perf_on.clone(),
+            chunks: self.chunks.borrow().clone(),
         };
         *self.rx.borrow_mut() = Some(rx);
         *self.pending.borrow_mut() = pending;
@@ -485,6 +505,32 @@ impl Surface {
                 }
             }
             Message::Resized(_) => self.resize_late.set(false),
+            Message::LoadChunk(id) => {
+                // The chunk's file name is its id: `is_chunk_name`
+                // (nsh-js) restricted it to a plain `<stem>.js`, so this
+                // join cannot leave the directory. Chunks load as source:
+                // they are files, and files can be replaced — bytecode
+                // only comes from trusted resources (`Bundle::read`).
+                let dir = self.chunks.borrow().clone();
+                match dir
+                    .map(|dir| std::fs::read_to_string(dir.join(&id)))
+                    .transpose()
+                {
+                    Ok(Some(code)) => {
+                        self.control(|c| c.chunk_loaded(Chunk::source(id, code)));
+                    }
+                    Ok(None) => {
+                        log::error!("chunk {id}: no chunk directory");
+                        self.control(|c| {
+                            c.chunk_failed(id.clone(), "no chunk directory".to_owned());
+                        });
+                    }
+                    Err(err) => {
+                        log::error!("chunk {id}: {err}");
+                        self.control(|c| c.chunk_failed(id.clone(), err.to_string()));
+                    }
+                }
+            }
         }
         false
     }
