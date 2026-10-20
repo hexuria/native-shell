@@ -187,6 +187,12 @@ Writes a split bundle (`native-pipeline.md`, "Split bundles"): `bundle.js` / `.m
 `<id>`, `<id>.map` and `<stem>.nshc` (`build::compile_split`, `Built::chunks`). Without `--split` (and for `nsh
 package`, `publish`, the dev server) the bundle holds the whole app.
 
+Hosts serve a chunk the bundle does not hold through `MountSink::load_chunk` (`AppOptions::chunks` on macOS):
+`nsh-macos-host --bundle <path>` reads it from the bundle's directory, the packaged macOS runner from
+`NSH_CHUNK_DIR` (a writable directory an app fills with its own delivered modules — the bundle's resources are
+read-only). Chunks always load as source: files can be replaced, so bytecode only comes from an app's signed
+resources (`Bundle::read`).
+
 ## `nsh trace`
 
 `nsh-engine`'s `headless` module (feature `headless`) does the run, on its driver `headless::Headless`: the app on an
