@@ -1187,8 +1187,41 @@ impl NshView {
         if ns.window().is_none() || ns.isHiddenOrHasHiddenAncestor() {
             return false;
         }
-        let visible = ns.visibleRect();
-        visible.size.width > 0.0 && visible.size.height > 0.0
+        // `visibleRect` follows the bounds as AppKit has them committed;
+        // while a scroll offset shows as a layer transform the truth is
+        // the scroll state, so the clip is each ancestor's effective
+        // viewport — the same walk, scroll-state origins instead
+        // ([`crate::scroll::bounds_origin`]; a plain view's is (0, 0)).
+        // Ancestor transforms are not applied: nearly all are identity,
+        // and a transformed clip at most defers or draws early.
+        // The placed frame (`ns().frame()`, mirroring applied), not the
+        // logical one, as the clip spaces are the ancestors' containers'.
+        let f = ns.frame();
+        let (mut x0, mut y0) = (f.origin.x as f32, f.origin.y as f32);
+        let (mut x1, mut y1) = (
+            f.origin.x as f32 + f.size.width as f32,
+            f.origin.y as f32 + f.size.height as f32,
+        );
+        let mut parent = self.parent_view();
+        while let Some(p) = parent {
+            let s = p.state();
+            let (ox, oy) = crate::scroll::bounds_origin(&p);
+            x0 = x0.max(ox);
+            y0 = y0.max(oy);
+            x1 = x1.min(ox + s.frame.size.width.0);
+            y1 = y1.min(oy + s.frame.size.height.0);
+            if x1 <= x0 || y1 <= y0 {
+                return false;
+            }
+            // Into the grandparent's content space: the offset origin
+            // shows at the frame's origin.
+            x0 += s.frame.origin.x.0 - ox;
+            x1 += s.frame.origin.x.0 - ox;
+            y0 += s.frame.origin.y.0 - oy;
+            y1 += s.frame.origin.y.0 - oy;
+            parent = p.parent_view();
+        }
+        true
     }
 
     /// Its frame, transform or shift changed: places it again.

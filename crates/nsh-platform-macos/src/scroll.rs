@@ -144,8 +144,8 @@ pub(crate) struct Live {
     /// When the moving offset should be committed to the container's
     /// bounds (ms; [`COMMIT_MS`] after the last move).
     commit_at: f64,
-    /// A bounds-commit task is scheduled.
-    commit_armed: bool,
+    /// A bounds-commit task is scheduled, and since when (ms).
+    commit_armed: Option<f64>,
 }
 
 /// Where trackpad events (gestures and their momentum) put the offset, by
@@ -442,14 +442,19 @@ fn arm_commit(surface: &Rc<Surface>, view: &NshView) {
             return;
         };
         s.live.commit_at = now() + COMMIT_MS as f64;
-        if s.live.commit_armed {
+        if s.live.commit_armed.is_some() {
             return;
         }
-        s.live.commit_armed = true;
+        s.live.commit_armed = Some(now());
         (surface.key(), state.id)
     };
     later(COMMIT_MS, move || commit(key, id));
 }
+
+/// The longest a bounds commit waits for a scroll phase to settle (ms).
+/// AppKit's model must eventually be right (tracking, accessibility,
+/// hosted views); a view that keeps receiving input commits anyway.
+const COMMIT_WAIT: f64 = 3000.0;
 
 /// Moves the scroll offset the layer transform has been showing into the
 /// container's bounds: a single subtree walk updates tracking areas,
@@ -467,17 +472,31 @@ fn commit(key: u64, id: nsh_core::NodeId) {
         return;
     };
     drop(mounter);
-    let wait = view
-        .state()
-        .scroll
-        .as_ref()
-        .map_or(0.0, |s| s.live.commit_at - now());
-    if wait > 1.0 {
-        later(wait.max(2.0) as u64, move || commit(key, id));
+    let t = now();
+    let (wait, moving) = {
+        let state = view.state();
+        let Some(s) = &state.scroll else {
+            return;
+        };
+        (
+            s.live.commit_at - t,
+            s.live.phase != Phase::Idle
+                && s.live
+                    .commit_armed
+                    .is_some_and(|armed| t - armed < COMMIT_WAIT),
+        )
+    };
+    // `setBoundsOrigin` walks the whole subtree (descendants' window
+    // geometry, tracking areas, cursor rects, hosted views' remote
+    // state): mid-scroll that walk drops a frame each time it runs, so
+    // the commit waits for the input to stop, not just a pause in it.
+    if moving || wait > 1.0 {
+        let delay = if moving { 32 } else { wait.max(2.0) as u64 };
+        later(delay, move || commit(key, id));
         return;
     }
     if let Some(s) = view.state_mut().scroll.as_mut() {
-        s.live.commit_armed = false;
+        s.live.commit_armed = None;
     }
     let origin = bounds_origin(&view);
     crate::surface::quiet(|| view.commit_bounds_origin(origin.0, origin.1));
