@@ -580,26 +580,22 @@ fn commit(key: u64, id: nsh_core::NodeId) {
     };
     drop(mounter);
     let t = now();
-    let (wait, moving) = {
+    let (wait, armed_since) = {
         let state = view.state();
         let Some(s) = &state.scroll else {
             return;
         };
-        (
-            s.live.commit_at - t,
-            s.live.phase != Phase::Idle
-                && s.live
-                    .commit_armed
-                    .is_some_and(|armed| t - armed < COMMIT_WAIT),
-        )
+        (s.live.commit_at - t, s.live.commit_armed)
     };
     // `setBoundsOrigin` walks the whole subtree (descendants' window
     // geometry, tracking areas, cursor rects, hosted views' remote
-    // state): mid-scroll that walk drops a frame each time it runs, so
-    // the commit waits for the input to stop, not just a pause in it.
-    if moving || wait > 1.0 {
-        let delay = if moving { 32 } else { wait.max(2.0) as u64 };
-        later(delay, move || commit(key, id));
+    // state): on a live frame that walk drops it, so the commit waits
+    // for the display link to rest — the input ended and nothing draws.
+    let overdue = armed_since.is_some_and(|armed| t - armed >= COMMIT_WAIT);
+    if !overdue
+        && (wait > 1.0 || phase(&view) != Phase::Idle || surface.wants_frames())
+    {
+        later(32, move || commit(key, id));
         return;
     }
     if let Some(s) = view.state_mut().scroll.as_mut() {
