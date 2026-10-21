@@ -738,6 +738,12 @@ pub struct HotUpdate {
 /// leftovers continue next frame.
 const MAX_LIST_ROUNDS: usize = 8;
 
+/// Cells bound per turn. One bind rebuilds a cell's whole subtree, so a
+/// screen of binds in a single turn merges into a mount batch big enough to
+/// miss a frame when the platform applies it. Pacing the binds keeps each
+/// batch small; overscan gives the deferred cells room to arrive early.
+const BIND_CELLS_PER_TURN: usize = 4;
+
 /// A cheap, cloneable handle for sending input to the engine from any thread.
 #[derive(Clone)]
 pub struct EngineControl {
@@ -1702,6 +1708,12 @@ impl<M: TextEngine> State<M> {
         let mut merged: Option<MountBatch> = None;
         let mut op_count = 0;
         let mut js = std::time::Duration::ZERO;
+        // A fast scroll asks for a screen of cells at once and each bind
+        // rebuilds a cell's whole subtree — merged, the mounts land on the
+        // platform in one transaction big enough to miss a frame. A few
+        // cells per turn keeps batches small; the rest bind next turn.
+        let mut cell_budget = BIND_CELLS_PER_TURN;
+        let mut deferred: Vec<ListBind> = Vec::new();
         for _ in 0..MAX_LIST_ROUNDS {
             // Requests from the previous round (or frame) first.
             let js_start = Instant::now();
@@ -1709,8 +1721,17 @@ impl<M: TextEngine> State<M> {
             // the core).
             let binds = self.binds.drain(..);
             if let Some(script) = script {
-                for bind in binds {
-                    script.bind_list(bind.list, &bind.binds);
+                for mut bind in binds {
+                    if bind.binds.len() > cell_budget {
+                        deferred.push(ListBind {
+                            list: bind.list,
+                            binds: bind.binds.split_off(cell_budget),
+                        });
+                    }
+                    if !bind.binds.is_empty() {
+                        cell_budget -= bind.binds.len();
+                        script.bind_list(bind.list, &bind.binds);
+                    }
                 }
             } else {
                 drop(binds);
@@ -1777,9 +1798,16 @@ impl<M: TextEngine> State<M> {
             self.core.take_events(&mut self.events);
             // Posts the ops queued (in program order) run in another round.
             let posted = script.is_some_and(Script::has_posted);
-            if self.binds.is_empty() && self.events.is_empty() && !posted {
+            if !deferred.is_empty() || (self.binds.is_empty() && self.events.is_empty() && !posted)
+            {
                 break;
             }
+        }
+        if !deferred.is_empty() {
+            // Back in the queue ahead of anything that arrived since; the
+            // wake binds them on the next turn's fresh budget.
+            self.binds.splice(0..0, deferred);
+            let _ = self.net.tx.send(Message::Wake);
         }
         self.committed_since_gc |= op_count > 0;
         if self.perf.is_some() && (op_count > 0 || merged.is_some()) {
