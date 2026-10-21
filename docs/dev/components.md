@@ -10,7 +10,7 @@ the styled layer, GPUI Kit's `gpui-component`, is never part of NSH. The look of
 come from two places:
 
 - **`nsh/base`**: unstyled base components of `gpui-base`'s scope, the crate `nsh-base` (`crates/nsh-base`,
-  `nsh_base::registry()`): `SafeAreaView`, `KeyboardAvoidingView`, `Button`, `Switch`, `SelectionArea` (texts that select
+  `nsh_base::registry()`): `SafeAreaView`, `KeyboardAvoidingView`, `Button`, `Checkbox`, `Switch`, `SelectionArea` (texts that select
   together, `text.md` "Selection areas"), `TextView` (`text-view.md`), the popups on the core's overlays (`Popover`,
   `Menu` with `MenuItem`, `MenuSeparator` and `Submenu`, `ContextMenu`, `Tooltip`, `Sheet`: "Popups" below) and the
   modules `AlertDialog`, `Keyboard`, beside the navigation `nsh-js` makes for it (`NavStack`, `NavPage`, `Dialog`, `createNavStack`); controls
@@ -40,7 +40,7 @@ come from two places:
 | `crates/nsh-core/src/ui/` | The API (`nsh_core::ui`, `prelude`): `Component`, `Module`, `Class` (`class.rs`, `callback.rs`; direct JS values: `js.rs`), elements, `Styled`, `Theme`, `Registry`, the status bar's layers (`status_bar.rs`), the declarations generator `typescript` |
 | `crates/nsh-macros` | `#[component]`, `#[derive(Props)]`, `#[derive(PropEnum)]`, `#[derive(Event)]`, `#[derive(JsObject)]`; `#[methods]`, `#[module]`, `#[class]`; `#[native_module("…")]` (an app crate's set: `docs/dev/tooling.md`); `style_helpers!` (the spacing methods of `Styled`) |
 | `crates/nsh-core/src/core/components.rs` | The core side: instances, children and slots, events; `core/views.rs`: views, their bindings' patches and regions |
-| `crates/nsh-base/` | `nsh/base`'s components and modules, one file each (`safe_area.rs`, `keyboard.rs`, `alert_dialog.rs`, `button.rs`, `switch.rs`; `TextView` a directory, `text_view/`), one `Registry` (`lib.rs`) |
+| `crates/nsh-base/` | `nsh/base`'s components and modules, one file each (`safe_area.rs`, `keyboard.rs`, `alert_dialog.rs`, `button.rs`, `checkbox.rs`, `switch.rs`; `TextView` a directory, `text_view/`), one `Registry` (`lib.rs`) |
 | `crates/nsh-core/src/runtime/` | The runtime's Rust modules (`nsh/android`, `nsh/accessibility`, `nsh/image`, `nsh/clipboard`, `nsh/desktop`), one `Registry` per JS module (`mod.rs`) |
 | `crates/nsh-js/src/components.rs` | The JS face of components and modules, made from their specs when a bundle imports the module; `classes.rs`: classes' (on the web classes' machinery), synchronous functions', callbacks |
 | `crates/nsh-js/src/declarations.rs` | `nsh/base.d.ts`, `app/native.d.ts`, ...: the declarations generated from each registry (`nsh_core::ui::declarations`) with the re-exports and the navigation |
@@ -605,9 +605,9 @@ it changes, and they are resolved again when the tokens change (`Components::app
   (`_hover`, `_focus_within`, `_named` for `group/name`) styles what is inside it by the group's states;
   `.dark(|s| ..)` styles what is not a color in dark appearance. Nested variants all have to hold. A part of a control
   shows the control's value and disabled state to its own classes and state styles with
-  `.project_checked(props.checked)` / `.project_disabled(props.disabled)` (`gpui-base`'s `SwitchThumb::new(checked)`):
-  the app writes `checked:` / `disabled:` in the part's class, and only the control's root is an accessibility
-  element.
+  `.project_checked(props.checked)` / `.project_indeterminate(props.indeterminate)` / `.project_disabled(props.disabled)`
+  (`gpui-base`'s `SwitchThumb::new(checked)`, `CheckboxIndicator::state(..)`): the app writes `checked:` /
+  `indeterminate:` / `disabled:` in the part's class, and only the control's root is an accessibility element.
 - What never changes is plain Rust, decided when the view is made: `.when(variant == Variant::Ghost, |v| ..)`.
 - The app's `class` / `classList` on a component (Tailwind) is merged after the root's rules; at equal rank it wins.
   The styles a view gives a nested component element merge the same way (bound ones too: `Patch::Nested`).

@@ -105,6 +105,7 @@ and take their look from the app.
 | Component | Rust | What it does | Page |
 |---|---|---|---|
 | `<Button>` | `nsh_base::button()` | A pressable control with its states and its role | [Button](./button.md) |
+| `<Checkbox>` | `nsh_base::checkbox()` | A checked, unchecked or indeterminate control with an indicator | [Checkbox](./checkbox.md) |
 | `<Switch>` | `nsh_base::switch()` | An on / off control with a track and a thumb | [Switch](./switch.md) |
 | `<Dialog>` | `nsh_base::dialog()` | Presents its children over everything else | [Dialog](./dialog.md) |
 | `<NavStack>`, `<NavPage>` | `nsh_base::nav_stack()`, `nsh_base::nav_page()` | Native navigation: a stack of pages with the platform's header and back gestures | [NavStack](./nav-stack.md) |
@@ -158,7 +159,7 @@ pressed, natively, with no round trip to the app's code (below).
 ### State styles
 
 Styles that apply while the view is in a state, over its own styles, natively. Each is the object form of a Tailwind
-variant. Later states win (selected and checked, then hover, focus, active); `disabledStyle` wins over all, and the others do not
+variant. Later states win (selected, checked and indeterminate, then hover, focus, active); `disabledStyle` wins over all, and the others do not
 apply while the view is disabled.
 
 | Prop | Rust | Class variant | Applies |
@@ -168,6 +169,7 @@ apply while the view is disabled.
 | `focusStyle` | `.focus(\|s\| ..)` | `focus:` | While the view has focus. |
 | `disabledStyle` | `.disabled_style(\|s\| ..)` | `disabled:` | While `disabled`. |
 | `checkedStyle` | `.checked(\|s\| ..)`, `.checked_style(style)` | `checked:` | While `accessibilityState.checked` is `true` (a checkbox, a switch, a radio; `"mixed"` is not checked). |
+| `indeterminateStyle` | `.indeterminate(\|s\| ..)`, `.indeterminate_style(style)` | `indeterminate:` | While `accessibilityState.checked` is `"mixed"` (a checkbox that is neither checked nor unchecked). |
 | | `.selected(\|s\| ..)` | `selected:` | While `accessibilityState.selected` is `true` (a selected `Button`, a tab). |
 
 ```rust tabs
