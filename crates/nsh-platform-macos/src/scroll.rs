@@ -47,6 +47,7 @@ use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSUserDefaults, ns_s
 use objc2_quartz_core::CALayer;
 
 use crate::{
+    input::later,
     surface::Surface,
     view::{NshView, ScrollState, ViewState},
 };
@@ -140,6 +141,11 @@ pub(crate) struct Live {
     spinner: Option<Retained<CALayer>>,
     /// Trackpad offsets waiting to be shown ([`Resampled`]).
     resampled: Option<Resampled>,
+    /// When the moving offset should be committed to the container's
+    /// bounds (ms; [`COMMIT_MS`] after the last move).
+    commit_at: f64,
+    /// A bounds-commit task is scheduled.
+    commit_armed: bool,
 }
 
 /// Where trackpad events (gestures and their momentum) put the offset, by
@@ -252,7 +258,7 @@ fn reported(state: &ViewState) -> (f32, f32) {
 }
 
 /// Milliseconds on the display link's clock.
-fn now() -> f64 {
+pub(crate) fn now() -> f64 {
     objc2_quartz_core::CACurrentMediaTime() * 1000.0
 }
 
@@ -398,18 +404,83 @@ fn settle(surface: &Rc<Surface>, view: &NshView) {
 
 // Moving.
 
-/// Shows the offset: the container's bounds origin.
-fn apply_offset(view: &NshView) {
-    let origin = {
-        let state = view.state();
-        let Some(s) = &state.scroll else { return };
-        let inset = s.behavior.content_inset.map(|v| v.0);
-        let x = s.x - inset.left;
-        // Mirrored children are placed from the right: the offset runs the
-        // other way.
-        (if s.mirrored { -x } else { x }, s.y - inset.top)
+/// The container bounds origin that shows the scroll offset. Mirrored
+/// children are placed from the right: the offset runs the other way.
+pub(crate) fn bounds_origin(view: &NshView) -> (f32, f32) {
+    let state = view.state();
+    let Some(s) = &state.scroll else {
+        return (0.0, 0.0);
     };
-    view.set_bounds_origin(origin.0, origin.1);
+    let inset = s.behavior.content_inset.map(|v| v.0);
+    let x = s.x - inset.left;
+    (if s.mirrored { -x } else { x }, s.y - inset.top)
+}
+
+/// A bounds commit follows the last move by this long (ms).
+const COMMIT_MS: u64 = 140;
+
+/// Shows the offset by translating the container layer's sublayers: the
+/// pixels move without any view geometry changing, so AppKit does not
+/// walk the subtree (`setBoundsOrigin` invalidates every descendant's
+/// geometry in the window — focus, tracking areas, cursor rects — and
+/// hosted views sync their remote state, per scroll step, which is the
+/// jank on long lists). The bounds commit once it settles ([`commit`])
+/// puts AppKit's model right for the price of one walk per scroll.
+fn apply_offset(surface: &Rc<Surface>, view: &NshView) {
+    let origin = bounds_origin(view);
+    let committed = view.container_bounds_origin();
+    view.set_layer_scroll(committed.0 - origin.0, committed.1 - origin.1);
+    arm_commit(surface, view);
+}
+
+/// Schedules the trailing bounds commit, `COMMIT_MS` after the offset
+/// last moved (`s.live.commit_at`).
+fn arm_commit(surface: &Rc<Surface>, view: &NshView) {
+    let (key, id) = {
+        let mut state = view.state_mut();
+        let Some(s) = state.scroll.as_mut() else {
+            return;
+        };
+        s.live.commit_at = now() + COMMIT_MS as f64;
+        if s.live.commit_armed {
+            return;
+        }
+        s.live.commit_armed = true;
+        (surface.key(), state.id)
+    };
+    later(COMMIT_MS, move || commit(key, id));
+}
+
+/// Moves the scroll offset the layer transform has been showing into the
+/// container's bounds: a single subtree walk updates tracking areas,
+/// cursor rects and accessibility with where things really are.
+fn commit(key: u64, id: nsh_core::NodeId) {
+    let Some(surface) = Surface::with_key(key) else {
+        return;
+    };
+    let Ok(mounter) = surface.mounter.try_borrow() else {
+        // A batch is being applied: try again shortly.
+        later(20, move || commit(key, id));
+        return;
+    };
+    let Some(view) = mounter.views.get(&id).cloned() else {
+        return;
+    };
+    drop(mounter);
+    let wait = view
+        .state()
+        .scroll
+        .as_ref()
+        .map_or(0.0, |s| s.live.commit_at - now());
+    if wait > 1.0 {
+        later(wait.max(2.0) as u64, move || commit(key, id));
+        return;
+    }
+    if let Some(s) = view.state_mut().scroll.as_mut() {
+        s.live.commit_armed = false;
+    }
+    let origin = bounds_origin(&view);
+    crate::surface::quiet(|| view.commit_bounds_origin(origin.0, origin.1));
 }
 
 /// Moves `view`'s main axis offset to `pos` (not clamped: drags rubber
@@ -435,7 +506,7 @@ fn moved_to(surface: &Rc<Surface>, view: &NshView, pos: f32) {
         (state.id, x, y)
     };
     crate::surface::quiet(|| {
-        apply_offset(view);
+        apply_offset(surface, view);
         pin_sticky(surface, view);
         update_overlays(view);
     });
@@ -1021,7 +1092,7 @@ pub(crate) fn config(
             child.place();
         }
     }
-    apply_offset(view);
+    apply_offset(_surface, view);
     update_overlays(view);
 }
 
@@ -1170,7 +1241,7 @@ pub(crate) fn behavior(_surface: &Rc<Surface>, view: &NshView, behavior: &Scroll
         inset
     };
     if inset {
-        apply_offset(view);
+        apply_offset(_surface, view);
         update_overlays(view);
     }
 }

@@ -1031,16 +1031,51 @@ impl NshView {
     fn size_container(&self) {
         if let Some(c) = &*self.ivars().container.borrow() {
             let f = self.state().frame;
-            let origin = c.bounds().origin;
+            let origin = crate::scroll::bounds_origin(self);
             c.setFrame(ns_rect(0.0, 0.0, f.size.width.0, f.size.height.0));
-            c.setBoundsOrigin(origin);
+            c.setBoundsOrigin(NSPoint::new(origin.0 as CGFloat, origin.1 as CGFloat));
+            if let Some(layer) = c.layer() {
+                layer.setSublayerTransform(IDENTITY);
+            }
         }
     }
 
-    /// Sets the origin of its container's bounds: the scroll offset.
-    pub(crate) fn set_bounds_origin(&self, x: f32, y: f32) {
+    /// The origin of the container's bounds as AppKit has it: the last
+    /// committed scroll offset, possibly stale while the offset shows as
+    /// a layer transform.
+    pub(crate) fn container_bounds_origin(&self) -> (f32, f32) {
+        self.container_view().map_or((0.0, 0.0), |c| {
+            let o = c.bounds().origin;
+            (o.x as f32, o.y as f32)
+        })
+    }
+
+    /// Shows the scroll offset by translating the container layer's
+    /// sublayers `(dx, dy)` points: the pixels move without view geometry
+    /// changing, so AppKit walks no descendant geometry (`setBoundsOrigin`
+    /// invalidates every descendant's window geometry — focus, tracking
+    /// areas, cursor rects — each scroll step, which is the scroll jank).
+    /// [`NshView::commit_bounds_origin`] syncs the views once it settles.
+    pub(crate) fn set_layer_scroll(&self, dx: f32, dy: f32) {
+        let Some(layer) = self.container_view().and_then(|c| c.layer()) else {
+            return;
+        };
+        let mut t = IDENTITY;
+        t.m41 = dx as CGFloat;
+        t.m42 = dy as CGFloat;
+        layer.setSublayerTransform(t);
+    }
+
+    /// Commits the scroll offset to the container's bounds origin and
+    /// drops the layer transform: a no-op visually (the transform carried
+    /// exactly the committed-to-live difference), one subtree walk for
+    /// AppKit to learn where things are.
+    pub(crate) fn commit_bounds_origin(&self, x: f32, y: f32) {
         let c = self.ensure_container();
         c.setBoundsOrigin(NSPoint::new(x as CGFloat, y as CGFloat));
+        if let Some(layer) = c.layer() {
+            layer.setSublayerTransform(IDENTITY);
+        }
     }
 
     /// Something it draws changed: content (text, canvas) is drawn again
