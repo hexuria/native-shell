@@ -125,22 +125,25 @@ fn start(app: &str) -> (Engine, mpsc::Receiver<MountBatch>, std::path::PathBuf) 
 
 fn scrolls_with_recycled_cells(app: &str) {
     let (engine, rx, dir) = start(app);
-    let first = rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    // 500 pt viewport + 500 pt overscan at 50 pt per row = 21 rows.
-    let first_texts = texts(&first);
-    assert_eq!(first_texts.len(), 21, "{first_texts:?}");
-    assert_eq!(first_texts[0], "row 0");
-    let list = first
-        .items
-        .iter()
-        .find_map(|i| match i {
+    // Binds are paced: a window arrives over several batches, not one.
+    let mut first = Vec::new();
+    let mut list = None;
+    while first.len() < 21 {
+        let batch = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        first.extend(texts(&batch));
+        list = list.or(batch.items.iter().find_map(|i| match i {
             MountItem::Create {
                 id,
                 kind: ViewKind::Scroll,
             } => Some(*id),
             _ => None,
-        })
-        .unwrap();
+        }));
+    }
+    // 500 pt viewport + 500 pt overscan at 50 pt per row = 21 rows.
+    let first_texts = &first[..21];
+    assert_eq!(first_texts.len(), 21, "{first_texts:?}");
+    assert_eq!(first_texts[0], "row 0");
+    let list = list.unwrap();
 
     // Scroll to row 40: rows 30..=60 are needed; cells are recycled, so the
     // update re-renders text in existing views instead of creating them.
@@ -149,14 +152,14 @@ fn scrolls_with_recycled_cells(app: &str) {
         nsh_core::geometry::point(nsh_core::geometry::px(0.0), nsh_core::geometry::px(2000.0)),
         u32::MAX,
     );
-    let batch = rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    let shown = texts(&batch);
-    assert!(shown.contains(&"row 40".to_owned()), "{shown:?}");
-    assert!(
-        cells_created(&batch) <= 10,
-        "created {} text views",
-        cells_created(&batch)
-    );
+    let mut shown = Vec::new();
+    let mut created = 0;
+    while !shown.iter().any(|t| t == "row 40") {
+        let batch = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        shown.extend(texts(&batch));
+        created += cells_created(&batch);
+    }
+    assert!(created <= 10, "created {created} text views");
 
     // Near the end: `onLoadMore` appends rows; the content grows.
     engine.control().scroll(
