@@ -31,7 +31,7 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender};
-use dispatch2::DispatchQueue;
+use dispatch2::{DispatchQueue, DispatchQueueGlobalPriority, GlobalQueueIdentifier};
 use nsh_core::{EventKind, EventPayload, MountBatch, MountItem, NodeId, Points, ROOT_ID, Size};
 use nsh_engine::{
     Chunk, Engine, EngineConfig, EngineControl, Environment, MountSink, perf::PerfMonitor,
@@ -526,24 +526,31 @@ impl Surface {
                 // they are files, and files can be replaced — bytecode
                 // only comes from trusted resources (`Bundle::read`).
                 let dir = self.chunks.borrow().clone();
-                match dir
-                    .map(|dir| std::fs::read_to_string(dir.join(&id)))
-                    .transpose()
-                {
-                    Ok(Some(code)) => {
-                        self.control(|c| c.chunk_loaded(Chunk::source(id, code)));
+                // Keep the reply tied to this engine if the app is replaced
+                // while the file is being read. File I/O stays off AppKit's
+                // main thread, as it does for images.
+                let Some(control) = self.control.borrow().clone() else {
+                    return false;
+                };
+                DispatchQueue::global_queue(GlobalQueueIdentifier::Priority(
+                    DispatchQueueGlobalPriority::Default,
+                ))
+                .exec_async(move || {
+                    match dir
+                        .map(|dir| std::fs::read_to_string(dir.join(&id)))
+                        .transpose()
+                    {
+                        Ok(Some(code)) => control.chunk_loaded(Chunk::source(id, code)),
+                        Ok(None) => {
+                            log::error!("chunk {id}: no chunk directory");
+                            control.chunk_failed(id, "no chunk directory".to_owned());
+                        }
+                        Err(err) => {
+                            log::error!("chunk {id}: {err}");
+                            control.chunk_failed(id, err.to_string());
+                        }
                     }
-                    Ok(None) => {
-                        log::error!("chunk {id}: no chunk directory");
-                        self.control(|c| {
-                            c.chunk_failed(id.clone(), "no chunk directory".to_owned());
-                        });
-                    }
-                    Err(err) => {
-                        log::error!("chunk {id}: {err}");
-                        self.control(|c| c.chunk_failed(id.clone(), err.to_string()));
-                    }
-                }
+                });
             }
         }
         false
