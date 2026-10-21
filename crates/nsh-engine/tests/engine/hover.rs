@@ -26,6 +26,7 @@ function App() {
           testID="inner"
           style={{ height: 40 }}
           onHoverIn={() => note("in inner")}
+          onMouseMove={(e) => note(`mouse ${e.x},${e.y}`)}
           onHoverMove={(e) => note(`move ${e.locationX},${e.locationY} ${e.pageX},${e.pageY}${e.shiftKey ? " shift" : ""}`)}
         />
       </View>
@@ -140,7 +141,11 @@ fn hover_handlers_are_in_the_event_masks_and_hear_their_events() {
     );
     assert_eq!(
         events(inner),
-        mask(&[EventKind::HoverIn, EventKind::HoverMove])
+        mask(&[
+            EventKind::HoverIn,
+            EventKind::HoverMove,
+            EventKind::MouseMove
+        ])
     );
 
     // As a desktop raises them: out from the inside, in from the outside.
@@ -170,4 +175,21 @@ fn hover_handlers_are_in_the_event_masks_and_hear_their_events() {
     assert!(moves.len() < 20, "moves are merged: {log}");
     assert_eq!(moves.last(), Some(&"move 20,2 30,12 shift"), "{log}");
     assert!(log.starts_with("log in outer|in inner|move "), "{log}");
+    for x in 1..=20 {
+        control.dispatch_event(
+            inner,
+            EventKind::MouseMove,
+            EventPayload::Map(vec![
+                ("x", nsh_core::PayloadValue::Number(f64::from(x))),
+                ("y", nsh_core::PayloadValue::Number(7.0)),
+            ]),
+        );
+    }
+    control.dispatch_event(outer, EventKind::HoverOut, EventPayload::None);
+    let log = until(&rx, "mouse moves followed by the out", |l| {
+        l.contains("mouse 20,7") && l.ends_with("out outer")
+    });
+    let moves: Vec<_> = log.split('|').filter(|e| e.starts_with("mouse ")).collect();
+    assert!(moves.len() < 20, "mouse moves are merged: {log}");
+    assert_eq!(moves.last(), Some(&"mouse 20,7"));
 }

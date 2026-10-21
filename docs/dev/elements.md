@@ -89,6 +89,11 @@ misses the deadline is not waited for again until it catches up (`docs/dev/macos
   `screenReader`, `osVersion` and `idiom` (VoiceOver / TalkBack changes are observed natively).
 - **`disabled`** on any element applies `disabled:` classes and removes its press and `onContextMenu` listeners from what
   is mounted (no press, no feedback; a secondary click goes on to the nearest enabled listener around it).
+- **`onMouseMove`** (any element; macOS, Linux, Windows, GPUI and web) reports actual mouse movement,
+  including with a button down. Each listening view under the pointer hears `{ x, y }` in its own coordinates
+  (points), innermost out. Rust's `.on_mouse_move` receives `Point<Points>`. The engine retains the latest move
+  per view per frame and flushes it before later non-motion events. Content updates and scrolling re-pick hover
+  state independently; they do not synthesize mouse motion. Touch and pen movement use the touch APIs.
 - **`onHoverIn` / `onHoverOut` / `onHoverMove`** (any element) tell JS, after the fact, that the mouse came over a view,
   left it, or moved over it with no button down. On the desktops they follow the same hover tracking as `hover:`
   classes: the views along the chain under the mouse (innermost first) whose classes read `HOVERED` or that listen to

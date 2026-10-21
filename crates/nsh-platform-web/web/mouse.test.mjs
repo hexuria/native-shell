@@ -1,0 +1,40 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import test from 'node:test';
+
+const source = await readFile(new URL('./nsh.js', import.meta.url), 'utf8');
+const { Player } = await import('data:text/javascript;base64,' + Buffer.from(source + '\nexport { Player };').toString('base64'));
+
+test('mouse motion visits nested listeners inside out, including with buttons down', () => {
+  const root = { parentNode: null, contains: (el) => el === child };
+  const outer = { _id: 2, parentNode: root, _events: new Set(['onMouseMove']), getBoundingClientRect: () => ({ left: 10, top: 20 }) };
+  const child = { _id: 3, parentNode: outer, _events: new Set(['onMouseMove']), getBoundingClientRect: () => ({ left: 30, top: 50 }) };
+  globalThis.document = { elementFromPoint: () => child };
+  globalThis.getComputedStyle = () => ({ transform: 'none', width: '100px', height: '100px' });
+  const player = Object.create(Player.prototype);
+  player.root = root;
+  player.mouseTracked = new Set([2, 3]);
+  const sent = [];
+  player.event = (...args) => sent.push(args);
+  const event = { pointerType: 'mouse', clientX: 45, clientY: 75, buttons: 1, target: outer };
+  player.mouseMoved(event);
+  assert.deepEqual(sent, [[3, 'onMouseMove', { x: 15, y: 25 }], [2, 'onMouseMove', { x: 35, y: 55 }]]);
+  sent.length = 0;
+  child._events.clear();
+  player.mouseMoved(event);
+  assert.deepEqual(sent, [[2, 'onMouseMove', { x: 35, y: 55 }]]);
+  sent.length = 0;
+  for (const pointerType of ['touch', 'pen']) player.mouseMoved({ ...event, pointerType });
+  assert.equal(sent.length, 0);
+  player.mouseTracked.clear();
+  document.elementFromPoint = () => { throw Error('unneeded hit test'); };
+  player.mouseMoved(event);
+  player.mouseTracked.add(2);
+  document.elementFromPoint = () => null;
+  player.mouseMoved(event);
+  document.elementFromPoint = () => ({});
+  player.mouseMoved(event);
+  assert.equal(sent.length, 0, 'capture outside the player dispatches no move');
+  delete globalThis.document;
+  delete globalThis.getComputedStyle;
+});

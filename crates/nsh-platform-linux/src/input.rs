@@ -119,6 +119,8 @@ pub(crate) struct Input {
     /// Views that track `HOVERED` or listen to hover events (hover is only
     /// tested while there are).
     hover_tracked: RefCell<FxHashSet<NodeId>>,
+    /// Views listening to mouse motion; other apps skip the extra hit test.
+    mouse_tracked: RefCell<FxHashSet<NodeId>>,
     /// Views that are hovered now.
     hovered: RefCell<Vec<NshView>>,
     /// Native gesture values by view.
@@ -230,6 +232,7 @@ pub(crate) fn reset(surface: &Surface) {
     input.wheel.borrow_mut().take();
     input.latch.borrow_mut().take();
     input.hover_tracked.borrow_mut().clear();
+    input.mouse_tracked.borrow_mut().clear();
     input.hovered.borrow_mut().clear();
     input.gestures.borrow_mut().clear();
     input.js_block.set(false);
@@ -258,6 +261,11 @@ fn hoverable(view: &NshView) -> bool {
 
 fn update_hover_tracking(surface: &Surface, view: &NshView) {
     let id = view.state().id;
+    if view.state().events.contains(EventKind::MouseMove) {
+        surface.input.mouse_tracked.borrow_mut().insert(id);
+    } else {
+        surface.input.mouse_tracked.borrow_mut().remove(&id);
+    }
     let mut tracked = surface.input.hover_tracked.borrow_mut();
     if hoverable(view) {
         tracked.insert(id);
@@ -492,6 +500,18 @@ fn dispatch(surface: &Rc<Surface>, event: &gdk::Event) -> glib::Propagation {
             up(surface, Key::Mouse, x, y, time, false)
         }
         T::MotionNotify => {
+            if event.device_tool().is_none()
+                && !event.device().is_some_and(|device| {
+                    matches!(
+                        device.source(),
+                        gdk::InputSource::Pen
+                            | gdk::InputSource::Touchscreen
+                            | gdk::InputSource::TabletPad
+                    )
+                })
+            {
+                mouse_moved(surface, x, y);
+            }
             motion(surface, Key::Mouse, x, y, time);
             let state = event.modifier_state();
             let buttons = gdk::ModifierType::BUTTON1_MASK
@@ -675,9 +695,7 @@ pub(crate) enum Simulated {
 pub(crate) fn simulate(surface: &Rc<Surface>, action: Simulated) {
     let time = glib::monotonic_time() as f64 / 1000.0;
     match action {
-        Simulated::Down(x, y) => {
-            down(surface, Key::Mouse, x, y, time, gdk::ModifierType::empty())
-        }
+        Simulated::Down(x, y) => down(surface, Key::Mouse, x, y, time, gdk::ModifierType::empty()),
         Simulated::Up(x, y) => {
             up(surface, Key::Mouse, x, y, time, false);
             // GTK never sees simulated input: a release on a hosted widget
@@ -686,12 +704,16 @@ pub(crate) fn simulate(surface: &Rc<Surface>, action: Simulated) {
                 focus_native(&native);
             }
         }
-        Simulated::Move(x, y) => motion(surface, Key::Mouse, x, y, time),
+        Simulated::Move(x, y) => {
+            mouse_moved(surface, x, y);
+            motion(surface, Key::Mouse, x, y, time);
+        }
         Simulated::Wheel(x, y, dx, dy) => {
             let step = WheelInput::Step { notches: false };
             wheel_input(surface, x, y, dx, dy, time, step);
         }
         Simulated::Hover(x, y) => {
+            mouse_moved(surface, x, y);
             hover(surface, x, y);
             hover_moved(surface, x, y, gdk::ModifierType::empty());
         }
@@ -1657,6 +1679,34 @@ fn set_hovered(surface: &Surface, views: Vec<NshView>) {
     for v in entered {
         set_state(surface, v, HOVERED, true);
         hover_event(surface, v, EventKind::HoverIn);
+    }
+}
+
+/// Real mouse motion only: content re-picking must not synthesize moves.
+fn mouse_moved(surface: &Surface, x: f32, y: f32) {
+    if surface.input.mouse_tracked.borrow().is_empty() {
+        return;
+    }
+    let Some(hit) = pick(&surface.root, x, y) else {
+        return;
+    };
+    for view in chain(&hit.view) {
+        let id = {
+            let state = view.state();
+            if !state.events.contains(EventKind::MouseMove) {
+                continue;
+            }
+            state.id
+        };
+        let (x, y) = local(surface, &view, x, y);
+        surface.event(
+            id,
+            EventKind::MouseMove,
+            EventPayload::Map(vec![
+                ("x", PayloadValue::Number(f64::from(x))),
+                ("y", PayloadValue::Number(f64::from(y))),
+            ]),
+        );
     }
 }
 

@@ -67,6 +67,7 @@ final class Native {
     static final int HOVER_MOVE = 56;
     static final int CONTEXT_MENU = 57;
     static final int COMPOSITION_CHANGE = 58;
+    static final int MOUSE_MOVE = 59;
 
     /**
      * Draws the SVG {@code bytes} for a view {@code maxPx} pixels on its longer side, with its shorter side that long

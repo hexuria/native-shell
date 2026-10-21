@@ -115,6 +115,8 @@ pub(crate) struct Input {
     latch: RefCell<Option<(NshView, bool, f64)>>,
     /// Views that track `HOVERED` or listen to hover events.
     hover_tracked: RefCell<FxHashSet<NodeId>>,
+    /// Views listening to mouse motion; other apps skip the extra hit test.
+    mouse_tracked: RefCell<FxHashSet<NodeId>>,
     /// Views that are hovered now.
     hovered: RefCell<Vec<NshView>>,
     /// Native gesture values by view.
@@ -220,6 +222,7 @@ pub(crate) fn reset(surface: &Surface) {
     input.momentum.borrow_mut().take();
     input.latch.borrow_mut().take();
     input.hover_tracked.borrow_mut().clear();
+    input.mouse_tracked.borrow_mut().clear();
     input.hovered.borrow_mut().clear();
     input.gestures.borrow_mut().clear();
     input.js_block.set(false);
@@ -248,6 +251,11 @@ fn hoverable(view: &NshView) -> bool {
 
 fn update_hover_tracking(surface: &Surface, view: &NshView) {
     let id = view.state().id;
+    if view.state().events.contains(EventKind::MouseMove) {
+        surface.input.mouse_tracked.borrow_mut().insert(id);
+    } else {
+        surface.input.mouse_tracked.borrow_mut().remove(&id);
+    }
     let mut tracked = surface.input.hover_tracked.borrow_mut();
     if hoverable(view) {
         tracked.insert(id);
@@ -500,7 +508,10 @@ pub(crate) fn event(surface: &Rc<Surface>, event: &NSEvent) {
                 shift,
             );
         }
-        NSEventType::LeftMouseDragged => {
+        NSEventType::LeftMouseDragged
+        | NSEventType::RightMouseDragged
+        | NSEventType::OtherMouseDragged => {
+            mouse_moved(surface, x, y);
             input.last.set(Some((x, y)));
             motion(surface, x, y, time);
         }
@@ -512,6 +523,9 @@ pub(crate) fn event(surface: &Rc<Surface>, event: &NSEvent) {
         NSEventType::MouseMoved | NSEventType::MouseEntered => {
             input.last.set(Some((x, y)));
             hover(surface, x, y);
+            if ty == NSEventType::MouseMoved {
+                mouse_moved(surface, x, y);
+            }
             hover_moved(surface, x, y, event.modifierFlags());
             reveal_indicators(surface, x, y);
             update_cursor(surface, x, y);
@@ -1690,6 +1704,34 @@ fn set_hovered(surface: &Surface, views: Vec<NshView>) {
     for v in entered {
         set_state(surface, v, HOVERED, true);
         hover_event(surface, v, EventKind::HoverIn);
+    }
+}
+
+/// Real mouse motion only: content re-picking must not synthesize moves.
+fn mouse_moved(surface: &Surface, x: f32, y: f32) {
+    if surface.input.mouse_tracked.borrow().is_empty() {
+        return;
+    }
+    let Some(hit) = pick(&surface.root, x, y) else {
+        return;
+    };
+    for view in chain(&hit.view) {
+        let id = {
+            let state = view.state();
+            if !state.events.contains(EventKind::MouseMove) {
+                continue;
+            }
+            state.id
+        };
+        let (x, y) = local(surface, &view, x, y);
+        surface.event(
+            id,
+            EventKind::MouseMove,
+            EventPayload::Map(vec![
+                ("x", PayloadValue::Number(f64::from(x))),
+                ("y", PayloadValue::Number(f64::from(y))),
+            ]),
+        );
     }
 }
 

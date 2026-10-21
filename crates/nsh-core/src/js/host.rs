@@ -454,7 +454,7 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
         EventKind::MouseMove,
         on::ALL,
         "(e: { x: number; y: number }) => void",
-        "The mouse moved inside the view (desktops with hover tracking); `x`/`y` are the view's local coordinates.",
+        "The mouse moved inside the view, including with a button down (desktops and web); `x`/`y` are local coordinates in points, delivered at most once per frame.",
     ),
     (
         EventKind::FileDragEnter,

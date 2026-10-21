@@ -9,6 +9,7 @@ import { Text, View, signal } from "nsh";
 function App() {
   const press = signal("none");
   const hover = signal("none");
+  const mouse = signal("none");
   const drop = signal("none");
   const action = signal("none");
   return (
@@ -24,6 +25,7 @@ function App() {
         <View
           testID="hover"
           style={{ height: 40 }}
+          onMouseMove={(e) => mouse.set(`${e.x},${e.y}`)}
           onHoverIn={() => hover.set("in")}
           onHoverMove={(e) =>
             hover.set(
@@ -36,6 +38,7 @@ function App() {
         />
       </View>
       <Text>Hover: {hover()}</Text>
+      <Text>Mouse: {mouse()}</Text>
       <View
         testID="drop"
         style={{ height: 40 }}

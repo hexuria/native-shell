@@ -1092,6 +1092,15 @@ pub trait Interactive: Element {
         )
     }
 
+    /// The mouse moved inside it, including while dragging: local coordinates
+    /// in points, at most once per frame (desktops and web).
+    fn on_mouse_move<M>(self, listener: impl IntoListener<crate::Point<crate::Points>, M>) -> Self {
+        self.on(
+            EventKind::MouseMove,
+            events::typed(listener.into_listener(), events::offset),
+        )
+    }
+
     /// The secondary button was pressed over it (a right click,
     /// Control-click on Apple platforms): where, to open a menu at
     /// (`page_x`, `page_y`). The nearest element that listens hears it;

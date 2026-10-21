@@ -77,7 +77,7 @@ const ENGINE_STACK_SIZE: usize = 8 * 1024 * 1024;
 /// parent/child links reference each other) wait for the collector.
 const IDLE_GC_INTERVAL: Duration = Duration::from_secs(1);
 
-/// The shortest time between two deliveries of `onHoverMove`: a frame at
+/// The shortest time between two deliveries of mouse motion: a frame at
 /// 120 Hz. Mice report moves far more often (up to 1000 Hz), and a handler
 /// that redraws a crosshair needs no more than one per frame.
 const HOVER_MOVE_INTERVAL: Duration = Duration::from_millis(8);
@@ -1569,10 +1569,10 @@ struct State<M: TextEngine> {
     scroll_events: FxHashMap<NodeId, ScrollEvent>,
     /// Touch moves not delivered yet: those queued in one frame become one.
     touch_move: Option<(NodeId, Box<nsh_core::TouchEvent>)>,
-    /// `onHoverMove`s not delivered yet: the latest per view, in the order
+    /// Hover and mouse moves not delivered yet: the latest per view, in the order
     /// they came; sent once per [`HOVER_MOVE_INTERVAL`] at most, and before
     /// any other event.
-    hover_moves: Vec<(NodeId, nsh_core::HoverEvent)>,
+    hover_moves: Vec<(NodeId, EventKind, EventPayload)>,
     /// When `hover_moves` were last delivered.
     hover_moved: Option<Instant>,
     /// The viewport size a resize set this turn ([`MountSink::resized`]).
@@ -1789,16 +1789,12 @@ impl<M: TextEngine> State<M> {
             return;
         }
         self.hover_moved = Some(nsh_core::time::now());
-        for (id, event) in std::mem::take(&mut self.hover_moves) {
-            let payload = EventPayload::Hover(event);
-            if self
-                .core
-                .component_event(id, EventKind::HoverMove, &payload)
-            {
+        for (id, kind, payload) in std::mem::take(&mut self.hover_moves) {
+            if self.core.component_event(id, kind, &payload) {
                 continue;
             }
             if let Some(script) = script {
-                script.dispatch_event(id, EventKind::HoverMove, &payload);
+                script.dispatch_event(id, kind, &payload);
             }
         }
     }
@@ -2057,12 +2053,16 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
             // Hover moves wait for the frame, the latest per view; any other
             // event comes after the moves before it (a view hears where the
             // mouse went before it hears it leave).
-            if let EventPayload::Hover(hover) = payload
-                && event == EventKind::HoverMove
+            if event == EventKind::MouseMove
+                || (event == EventKind::HoverMove && matches!(payload, EventPayload::Hover(_)))
             {
-                match state.hover_moves.iter_mut().find(|(v, _)| *v == id) {
-                    Some((_, pending)) => *pending = hover,
-                    None => state.hover_moves.push((id, hover)),
+                match state
+                    .hover_moves
+                    .iter_mut()
+                    .find(|(v, kind, _)| *v == id && *kind == event)
+                {
+                    Some((_, _, pending)) => *pending = payload,
+                    None => state.hover_moves.push((id, event, payload)),
                 }
                 return true;
             }

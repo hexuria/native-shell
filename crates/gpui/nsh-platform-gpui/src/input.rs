@@ -257,6 +257,8 @@ pub(crate) struct Input {
     latch: RefCell<Option<(NshView, bool, f64)>>,
     /// Views that track `HOVERED`.
     hover_tracked: RefCell<FxHashSet<NodeId>>,
+    /// Views listening to mouse motion; other apps skip the extra hit test.
+    mouse_tracked: RefCell<FxHashSet<NodeId>>,
     /// Views that are hovered now.
     hovered: RefCell<Vec<NshView>>,
     /// The hosted item under the mouse (it gets moves and a leave).
@@ -454,6 +456,7 @@ pub(crate) fn reset(surface: &Surface) {
     input.momentum.set(None);
     input.latch.borrow_mut().take();
     input.hover_tracked.borrow_mut().clear();
+    input.mouse_tracked.borrow_mut().clear();
     input.hovered.borrow_mut().clear();
     input.hover_item.borrow_mut().take();
     input.gestures.borrow_mut().clear();
@@ -483,6 +486,11 @@ fn hoverable(view: &NshView) -> bool {
 
 fn update_hover_tracking(surface: &Surface, view: &NshView) {
     let id = view.state().id;
+    if view.state().events.contains(EventKind::MouseMove) {
+        surface.input.mouse_tracked.borrow_mut().insert(id);
+    } else {
+        surface.input.mouse_tracked.borrow_mut().remove(&id);
+    }
     let mut tracked = surface.input.hover_tracked.borrow_mut();
     if hoverable(view) {
         tracked.insert(id);
@@ -811,6 +819,9 @@ pub(crate) fn pointer(surface: &Rc<Surface>, event: PointerEvent) {
     } else {
         Key::Mouse
     };
+    if key == Key::Mouse && event.kind == PointerKind::Move {
+        mouse_moved(surface, event.x, event.y);
+    }
     let (x, y) = (event.x, event.y);
     let time = event.time * 1000.0;
     let mouse = key == Key::Mouse;
@@ -1996,6 +2007,34 @@ fn hover(surface: &Rc<Surface>, x: f32, y: f32, modifiers: Modifiers) {
         }
         let item = hit.and_then(|h| h.item.map(|n| Item::Hosted(h.view, n)));
         set_hover_item(surface, item, (x, y), modifiers);
+    }
+}
+
+/// Real mouse motion only: content re-picking must not synthesize moves.
+fn mouse_moved(surface: &Surface, x: f32, y: f32) {
+    if surface.input.mouse_tracked.borrow().is_empty() {
+        return;
+    }
+    let Some(hit) = pick(&surface.root, x, y, true) else {
+        return;
+    };
+    for view in chain(&hit.view) {
+        let id = {
+            let state = view.state();
+            if !state.events.contains(EventKind::MouseMove) {
+                continue;
+            }
+            state.id
+        };
+        let (x, y) = local(&view, x, y);
+        surface.event(
+            id,
+            EventKind::MouseMove,
+            EventPayload::Map(vec![
+                ("x", PayloadValue::Number(f64::from(x))),
+                ("y", PayloadValue::Number(f64::from(y))),
+            ]),
+        );
     }
 }
 
