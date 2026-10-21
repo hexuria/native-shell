@@ -128,6 +128,9 @@ pub(crate) struct Input {
     /// Hovered views and the cursor are picked again on the main queue
     /// (what is under the mouse moved).
     repick: Cell<bool>,
+    /// The deadline the armed repick waits for (display-link ms): a burst
+    /// of content moves re-arms it, so the pick lands once, settled.
+    repick_at: Cell<f64>,
     /// Next touch identifier.
     next_id: Cell<u32>,
     /// Next press / fade / zoom generation (invalidates callbacks of
@@ -566,27 +569,45 @@ fn refresh_cursor(surface: &Surface) {
     }
 }
 
+/// A repick waits this long after the last content move (ms): each repick
+/// is a full hit test, and a scroll calls `content_moved` per step — the
+/// burst re-arms the deadline so the pick lands once, when it settles.
+const REPICK_MS: f64 = 120.0;
+
 /// What is under the mouse may have moved (a scroll, a batch): hovered
 /// views and the cursor follow it, as AppKit's tracking areas do, though
 /// the mouse did not move. Once per main-queue turn, however many scroll
-/// views moved or batches came.
+/// views moved or batches came — and during a scroll burst it defers to
+/// `repick_at`, one trailing pick rather than a hit test per step.
 pub(crate) fn content_moved(surface: &Surface) {
     let input = &surface.input;
-    if input.repick.get() || input.last.get().is_none() {
+    if input.last.get().is_none() {
         return;
     }
-    input.repick.set(true);
+    input.repick_at.set(crate::scroll::now() + REPICK_MS);
+    if input.repick.replace(true) {
+        return;
+    }
     let key = surface.key();
-    DispatchQueue::main().exec_async(move || {
-        let Some(surface) = Surface::with_key(key) else {
-            return;
-        };
-        surface.input.repick.set(false);
-        if let Some((x, y)) = surface.input.last.get() {
-            crate::surface::quiet(|| hover(&surface, x, y));
-            update_cursor(&surface, x, y);
-        }
-    });
+    later(REPICK_MS as u64, move || repick(key));
+}
+
+/// The armed repick: waits out the deadline `content_moved` keeps pushing
+/// while content still moves under the mouse, then picks once.
+fn repick(key: u64) {
+    let Some(surface) = Surface::with_key(key) else {
+        return;
+    };
+    let wait = surface.input.repick_at.get() - crate::scroll::now();
+    if wait > 1.0 {
+        later(wait.max(2.0) as u64, move || repick(key));
+        return;
+    }
+    surface.input.repick.set(false);
+    if let Some((x, y)) = surface.input.last.get() {
+        crate::surface::quiet(|| hover(&surface, x, y));
+        update_cursor(&surface, x, y);
+    }
 }
 
 // --- AppKit events ------------------------------------------------------------------
@@ -989,12 +1010,14 @@ fn on_native(view: &NshView, sub: &objc2_app_kit::NSView, p: (f32, f32)) -> bool
     })
 }
 
-/// The origin of `view`'s container's bounds (its scroll offset).
+/// The origin of `view`'s container's bounds (its scroll offset): the
+/// scroll state, not the bounds — while scrolling the offset shows as a
+/// layer transform and the bounds catch up when it settles.
 fn container_offset(view: &NshView) -> (f32, f32) {
-    view.container_view().map_or((0.0, 0.0), |c| {
-        let o = c.bounds().origin;
-        (o.x as f32, o.y as f32)
-    })
+    if view.container_view().is_none() {
+        return (0.0, 0.0);
+    }
+    crate::scroll::bounds_origin(view)
 }
 
 /// A point in the coordinates of `child`'s parent's container in
@@ -1478,7 +1501,7 @@ fn after(surface: &Rc<Surface>, generation: u64, ms: u64, f: fn(&Rc<Surface>, &m
 }
 
 /// Runs `f` on the main queue after `ms` milliseconds.
-fn later(ms: u64, f: impl FnOnce() + Send + 'static) {
+pub(crate) fn later(ms: u64, f: impl FnOnce() + Send + 'static) {
     let when = DispatchTime::NOW.time(Duration::from_millis(ms).as_nanos() as i64);
     if let Err(err) = DispatchQueue::main().after(when, f) {
         log::warn!("input: cannot schedule a timer: {err:?}");
