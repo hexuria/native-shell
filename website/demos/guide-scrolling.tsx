@@ -1,5 +1,5 @@
 import { mount, Scroll, signal, Text, View, type YNode } from "nsh";
-import { createNativeValue } from "nsh/animated";
+import { createAnimatedValue } from "nsh/animated";
 import { tint, ui } from "./palette";
 
 // Tints of the info, violet, danger, warn and up colours under the text colour.
@@ -69,7 +69,7 @@ function Cards() {
 
 function App() {
   // The vertical offset, written natively in the frame it changes.
-  const offset = createNativeValue(0);
+  const offset = createAnimatedValue(0);
   const y = signal(0);
   const refreshing = signal(false);
   const refreshed = signal(0);
@@ -133,7 +133,7 @@ function App() {
           </Each>
           <View
             onPress={() => scroll.scrollTo({ y: 0 })}
-            activeOpacity={0.6}
+            activeStyle={{ opacity: 0.6 }}
             style={{
               padding: 14,
               borderRadius: 10,

@@ -10,6 +10,7 @@ use tungstenite::{Message, WebSocket, stream::MaybeTlsStream};
 
 use crate::protocol::{
     BundleFormat, ClientMessage, HostPlatform, LogLevel, PROTOCOL_VERSION, ServerMessage,
+    StepOutcome, TestStep,
 };
 
 /// Something the dev server told the host.
@@ -19,6 +20,37 @@ pub enum DevEvent {
     Connected,
     /// Lost the connection; the client keeps retrying.
     Disconnected,
+    /// The server runs a test session: keep the model of the app test
+    /// steps need, from the first bundle on. Comes before the bundle.
+    Testing,
+    /// A step of the test: answer it with [`DevClient::step_done`] and its
+    /// id.
+    Step {
+        /// Its id.
+        id: u64,
+        /// What to do.
+        step: TestStep,
+    },
+    /// What a test session's app starts with
+    /// ([`crate::protocol::ServerMessage::TestSetup`]): the storage it
+    /// finds. Its requests go to the test ([`DevClient::fetch`]).
+    TestSetup {
+        /// The storage's entries.
+        storage: Vec<(String, String)>,
+        /// Trace the app: log each commit's timings and send each batch
+        /// ([`DevClient::trace`]).
+        trace: bool,
+    },
+    /// The test's answer to request `id` ([`DevClient::fetch`]): one
+    /// event of it.
+    Fetch {
+        /// The request's id.
+        id: u64,
+        /// The event.
+        reply: crate::protocol::FetchReply,
+    },
+    /// Run the host's own Rust root (see [`crate::protocol::ServerMessage::Root`]).
+    Root,
     /// A rebuild started.
     Building,
     /// The build failed.
@@ -60,6 +92,13 @@ pub enum DevEvent {
         source_map: Option<String>,
         /// What the app declares it may reach (JSON), if it declares it.
         capabilities: Option<String>,
+        /// The app's id (`nsh.json` `"id"`): give it to the bundle
+        /// (`Bundle::with_app_id`), as it names where the app keeps its data.
+        app_id: Option<String>,
+        /// The VM limits to run it with (`nsh run --limits`, see
+        /// [`ServerMessage::Bundle`]): `nsh_core::js::Limits::development`
+        /// reads them; `None` is none.
+        limits: Option<String>,
     },
 }
 
@@ -72,15 +111,19 @@ pub struct HostInfo {
     pub platform: HostPlatform,
     /// The bytecode format its engine loads (`BYTECODE_VERSION`).
     pub bytecode_version: String,
-    /// The specifiers of the UI sets it serves (`nsh/ui/mobile`, an app's
+    /// The specifiers of the UI sets it serves (an app's
     /// own): the server sends no bundle that imports others.
     pub ui_sets: Vec<String>,
+    /// It takes test steps ([`DevEvent::Step`]).
+    pub tests: bool,
 }
 
 /// Connects a dev host to a dev server, reconnecting until dropped, and
 /// forwards log lines to it.
 pub struct DevClient {
     logs: SyncSender<ClientMessage>,
+    /// Steps' outcomes, which are never dropped.
+    replies: mpsc::Sender<ClientMessage>,
 }
 
 /// How long a read may block before pending log lines are flushed.
@@ -96,12 +139,14 @@ impl DevClient {
         mut on_event: impl FnMut(DevEvent) + Send + 'static,
     ) -> std::io::Result<DevClient> {
         let (logs, log_rx) = mpsc::sync_channel(LOG_QUEUE);
+        let (replies, reply_rx) = mpsc::channel();
         let hello = ClientMessage::Hello {
             protocol: PROTOCOL_VERSION,
             bytecode_version: host.bytecode_version,
             device: host.device,
             platform: Some(host.platform),
             ui_sets: Some(host.ui_sets),
+            tests: host.tests,
         };
         thread::Builder::new()
             .name("nsh-dev-client".into())
@@ -117,7 +162,7 @@ impl DevClient {
                             backoff = Duration::from_millis(100);
                             on_event(DevEvent::Connected);
                             if let Err(SessionEnd::Shutdown) =
-                                session(socket, &hello, &log_rx, &mut on_event)
+                                session(socket, &hello, &log_rx, &reply_rx, &mut on_event)
                             {
                                 return;
                             }
@@ -128,7 +173,29 @@ impl DevClient {
                     thread::sleep(backoff);
                 }
             })?;
-        Ok(DevClient { logs })
+        Ok(DevClient { logs, replies })
+    }
+
+    /// Forwards the app's request `id` to the test, which answers with
+    /// [`DevEvent::Fetch`]es of that id (a test session's).
+    pub fn fetch(&self, id: u64, request: crate::protocol::WireRequest) {
+        let _ = self.replies.send(ClientMessage::Fetch { id, request });
+    }
+
+    /// The app no longer wants the answer to request `id`.
+    pub fn fetch_cancel(&self, id: u64) {
+        let _ = self.replies.send(ClientMessage::FetchCancel { id });
+    }
+
+    /// Sends the mount items of a batch the traced app applied, a line
+    /// each ([`DevEvent::TestSetup`]), in order with the steps' outcomes.
+    pub fn trace(&self, items: Vec<String>) {
+        let _ = self.replies.send(ClientMessage::Trace { items });
+    }
+
+    /// Sends the outcome of the step `id` ([`DevEvent::Step`]).
+    pub fn step_done(&self, id: u64, outcome: StepOutcome) {
+        let _ = self.replies.send(ClientMessage::StepDone { id, outcome });
     }
 
     /// Queues a log line for the server. Never blocks; drops on overflow.
@@ -151,6 +218,7 @@ fn session(
     mut socket: WebSocket<MaybeTlsStream<TcpStream>>,
     hello: &ClientMessage,
     logs: &Receiver<ClientMessage>,
+    replies: &Receiver<ClientMessage>,
     on_event: &mut impl FnMut(DevEvent),
 ) -> Result<(), SessionEnd> {
     if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
@@ -167,6 +235,8 @@ fn session(
         format: BundleFormat,
         source_map: bool,
         capabilities: Option<String>,
+        app_id: Option<String>,
+        limits: Option<String>,
         bytes: Option<Vec<u8>>,
     }
     let mut pending: Option<Pending> = None;
@@ -179,6 +249,9 @@ fn session(
                 Err(TryRecvError::Disconnected) => return Err(SessionEnd::Shutdown),
             }
         }
+        while let Ok(msg) = replies.try_recv() {
+            send(&mut socket, &msg)?;
+        }
         let msg = match socket.read() {
             Ok(msg) => msg,
             Err(tungstenite::Error::Io(err))
@@ -190,7 +263,18 @@ fn session(
         };
         match msg {
             Message::Text(text) => match serde_json::from_str::<ServerMessage>(&text) {
-                Ok(ServerMessage::Hello { session, .. }) => server_session = session,
+                Ok(ServerMessage::Hello { session, test, .. }) => {
+                    server_session = session;
+                    if test {
+                        on_event(DevEvent::Testing);
+                    }
+                }
+                Ok(ServerMessage::Step { id, step }) => on_event(DevEvent::Step { id, step }),
+                Ok(ServerMessage::TestSetup { storage, trace }) => {
+                    on_event(DevEvent::TestSetup { storage, trace })
+                }
+                Ok(ServerMessage::Fetch { id, reply }) => on_event(DevEvent::Fetch { id, reply }),
+                Ok(ServerMessage::Root) => on_event(DevEvent::Root),
                 Ok(ServerMessage::Building) => on_event(DevEvent::Building),
                 Ok(ServerMessage::BuildFailed { message }) => {
                     on_event(DevEvent::BuildFailed(message))
@@ -203,6 +287,8 @@ fn session(
                     format,
                     source_map,
                     capabilities,
+                    app_id,
+                    limits,
                 }) => {
                     pending = Some(Pending {
                         version,
@@ -210,6 +296,8 @@ fn session(
                         format,
                         source_map,
                         capabilities,
+                        app_id,
+                        limits,
                         bytes: None,
                     })
                 }
@@ -224,6 +312,8 @@ fn session(
                         format: BundleFormat::Source,
                         source_map,
                         capabilities: None,
+                        app_id: None,
+                        limits: None,
                         bytes: None,
                     })
                 }
@@ -261,6 +351,8 @@ fn session(
                         bytes,
                         source_map,
                         capabilities: p.capabilities,
+                        app_id: p.app_id,
+                        limits: p.limits,
                     }),
                 }
             }

@@ -1,11 +1,15 @@
-import { mount, Scroll, signal, Text, untracked, View } from "nsh";
+import { effect, Image, mount, Scroll, signal, Text, untracked, View } from "nsh";
+import { Animated, createAnimatedValue, Easing } from "nsh/animated";
 import { Platform, windowSize } from "nsh/device";
-import { Image } from "nsh/image";
-import { Screen, Stack, StatusBar } from "nsh/ui/mobile";
+import { isAvailable as hasWindow, Window } from "nsh/desktop";
+import { NavPage, NavStack } from "nsh/base";
+import { keymap } from "nsh/keymap";
+import { Storage } from "nsh/storage";
 import { Icon } from "./icons";
+import { TitleBar } from "./TitleBar";
 import logo from "./logo@2x.png";
 import { type DemoEntry, nav } from "./nav";
-import { Appear, Badge, colors, desktop, header, IconTile, isDark, lazy, mono, Press, radius, SIDEBAR } from "./ui";
+import { Appear, Badge, colors, desktop, header, IconTile, lazy, mono, PageHeader, Press, radius, SIDEBAR, sidebarOpen } from "./ui";
 
 /** The demos, by what they show; each module loads when first shown (`lazy`). */
 const groups: { title: string; demos: DemoEntry[] }[] = [
@@ -13,7 +17,7 @@ const groups: { title: string; demos: DemoEntry[] }[] = [
     title: "Apps",
     demos: [
       { name: "Stocks", detail: "A live watchlist and a stock: candles, depth, the tape, a tick every 50 ms", icon: "stocks", screen: lazy(() => import("./demos/Stocks").then((m) => m.Stocks)) },
-      { name: "AI Chat", detail: "Streaming replies, tools, reasoning, attachments, errors", icon: "chat", screen: lazy(() => import("./demos/Chat").then((m) => m.Chat)) },
+      { name: "AI Chat", detail: "Local Claude / Codex, streaming replies, web simulation", icon: "chat", screen: lazy(() => import("./demos/Chat").then((m) => m.Chat)) },
       { name: "Photos", detail: "A long recycled list: images, pull to refresh, paging", icon: "photos", screen: lazy(() => import("./demos/Photos").then((m) => m.Photos)) },
     ],
   },
@@ -41,16 +45,18 @@ const groups: { title: string; demos: DemoEntry[] }[] = [
       { name: "Styles", detail: "Corners, borders, shadows, clipping, 3D transforms", icon: "styles", screen: lazy(() => import("./demos/Styles").then((m) => m.Styles)) },
       { name: "Tailwind", detail: "class=\"…\" resolved natively: variants, grid, shadows, motion", icon: "tailwind", screen: lazy(() => import("./demos/Tailwind").then((m) => m.Tailwind)) },
       { name: "Text", detail: "Fonts, spans, inline views and images, decorations, truncation, languages", icon: "text", screen: lazy(() => import("./demos/TextDemo").then((m) => m.TextDemo)) },
+      { name: "Text View", detail: "Markdown and HTML documents, extensions, streaming replies", icon: "text", screen: lazy(() => import("./demos/TextViewDemo").then((m) => m.TextViewDemo)) },
       { name: "Images", detail: "Resize modes, tint, GIF / WebP, placeholders, blur, fade", icon: "image", screen: lazy(() => import("./demos/Images").then((m) => m.Images)) },
     ],
   },
   {
     title: "Platform",
     demos: [
-      { name: "Mobile UI", detail: "nsh/ui/mobile in Rust: a ListView and a Group of the app's rows", icon: "mobile", screen: lazy(() => import("./demos/MobileUi").then((m) => m.MobileUi)) },
-      { name: "Components", detail: "Press feedback, sheet, layout animation, input accessory, modal options", icon: "components", screen: lazy(() => import("./demos/Components").then((m) => m.Components)) },
+      { name: "Components", detail: "Press feedback, sheet, layout animation, input accessory, dialog options", icon: "components", screen: lazy(() => import("./demos/Components").then((m) => m.Components)) },
       { name: "Web and video", detail: "WKWebView / WebView, AVPlayer / MediaPlayer", icon: "media", screen: lazy(() => import("./demos/Media").then((m) => m.Media)) },
       { name: "System", detail: "Status bar, alerts, action sheets, environment, timers, fetch", icon: "system", screen: lazy(() => import("./demos/System").then((m) => m.System)) },
+      { name: "Standard APIs", detail: "Files, processes, TCP, WebSockets, buffers, crypto and utilities", icon: "system", screen: lazy(() => import("./demos/Standard").then((m) => m.StandardDemo)) },
+      { name: "Storage", detail: "nsh/storage: a launch count, a note saved as you type, the stored keys", icon: "storage", screen: lazy(() => import("./demos/Storage").then((m) => m.StorageDemo)) },
     ],
   },
 ];
@@ -84,7 +90,7 @@ function DemoRow(props: { demo: DemoEntry; first: boolean }) {
 
 function Home() {
   return (
-    <Screen title="Gallery" {...header}>
+    <NavPage title="Gallery" {...header} header={<PageHeader title="Gallery" root />}>
       <Scroll style={{ flex: 1, backgroundColor: colors.background }}>
         <View style={{ padding: 16, paddingBottom: 40, gap: 20 }}>
           <Each of={groups}>
@@ -115,16 +121,16 @@ function Home() {
           </Each>
         </View>
       </Scroll>
-    </Screen>
+    </NavPage>
   );
 }
 
 /** The phone layout: the index, demos pushed over it. */
 function Phone() {
   // Back from the desktop layout: the demo it showed stays open.
-  if (untracked(wasDesktop)) nav.reset([untracked(nav.routes)[0], { name: "demo", demo: untracked(selected) }]);
+  if (untracked(wasDesktop)) nav.setRoutes([untracked(nav.routes)[0], { name: "demo", demo: untracked(selected) }]);
   return (
-    <Stack navigator={nav} style={{ flex: 1 }}>
+    <NavStack state={nav} style={{ flex: 1 }}>
       {(route) => {
         switch (route.name) {
           case "home":
@@ -132,11 +138,11 @@ function Phone() {
           case "demo": {
             const Demo = route.demo.screen;
             return (
-              <Screen title={route.demo.name} {...header}>
+              <NavPage title={route.demo.name} {...header} header={<PageHeader title={route.demo.name} />}>
                 <View style={{ flex: 1, backgroundColor: colors.background }}>
                   <Demo />
                 </View>
-              </Screen>
+              </NavPage>
             );
           }
           case "page": {
@@ -145,7 +151,7 @@ function Phone() {
           }
         }
       }}
-    </Stack>
+    </NavStack>
   );
 }
 
@@ -156,18 +162,18 @@ const wasDesktop = signal(false);
 
 /** Shows a demo in the desktop layout, closing what it had pushed. */
 const select = (demo: DemoEntry) => {
-  if (nav.routes().length > 1) nav.popToTop();
+  if (nav.routes().length > 1) nav.popToRoot();
   selected.set(demo);
 };
 
 /** A demo in the sidebar: an accent bar and a raised fill when selected,
  * a fill under the pointer otherwise. */
 function SidebarRow(props: { demo: DemoEntry }) {
-  const active = () => selected() === props.demo;
+  const active = () => selected().name === props.demo.name;
   return (
     <View
       onPress={() => select(props.demo)}
-      accessibilityRole="button"
+      role="button"
       accessibilityLabel={props.demo.name}
       accessibilityState={{ selected: active() }}
       class={active() ? "bg-paper-border dark:bg-graphite-raised" : "hover:bg-paper-card active:bg-paper-border dark:hover:bg-graphite-line dark:active:bg-graphite-raised"}
@@ -182,36 +188,84 @@ function SidebarRow(props: { demo: DemoEntry }) {
   );
 }
 
-/** The desktop layout's sidebar: the app, the demos by group, the window. */
-function Sidebar() {
+/** Hides or shows the desktop layout's sidebar: the content pane takes its
+ * place at once, the sidebar slides away over it (or in, the pane making
+ * room first), so no gap shows while it moves. */
+const toggleSidebar = () => sidebarOpen.set(!untracked(sidebarOpen));
+
+/** The title bar's button that hides and shows the sidebar, where desktop
+ * apps put it: at the title bar's leading edge, after the logo. */
+function SidebarToggle() {
   return (
-    <View style={{ width: SIDEBAR, backgroundColor: colors.inset, borderRightWidth: 1, borderRightColor: colors.line }}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 20, paddingTop: 20, paddingBottom: 12 }}>
-        <Image src={logo} style={{ width: 32, height: 32, borderRadius: 8 }} />
-        <View style={{ flex: 1, gap: 1 }}>
-          <Text style={{ fontSize: 16, fontWeight: "600", color: colors.text }}>Gallery</Text>
-          <Text style={{ fontSize: 12, color: colors.muted }}>NSH · {Platform.OS}</Text>
+    <View
+      onPress={toggleSidebar}
+      role="button"
+      accessibilityLabel="Toggle sidebar"
+      accessibilityState={{ selected: sidebarOpen() }}
+      class="hover:bg-paper-card active:bg-paper-border dark:hover:bg-graphite-line dark:active:bg-graphite-raised"
+      style={{ width: 28, height: 28, alignItems: "center", justifyContent: "center", borderRadius: radius.control, cursor: "pointer" }}
+    >
+      <Icon name="sidebar" size={18} tint={colors.muted} />
+    </View>
+  );
+}
+
+/** The desktop layout's sidebar: the app, the demos by group, the window.
+ * Its place in the row changes at once (0 pt collapsed); the panel slides
+ * natively, over the content pane. */
+function Sidebar() {
+  const slide = createAnimatedValue(untracked(sidebarOpen) ? 0 : -SIDEBAR);
+  let first = true;
+  effect(() => {
+    const open = sidebarOpen();
+    if (first) {
+      first = false;
+      return;
+    }
+    Animated.timing(slide, { toValue: open ? 0 : -SIDEBAR, duration: 220, easing: Easing.out(Easing.cubic) }).start();
+  });
+  return (
+    <View style={{ width: sidebarOpen() ? SIDEBAR : 0, flexShrink: 0, zIndex: 1 }}>
+      <View
+        style={{
+          position: "absolute",
+          top: 0,
+          bottom: 0,
+          left: 0,
+          width: SIDEBAR,
+          transform: [{ translateX: slide }],
+          backgroundColor: colors.inset,
+          borderRightWidth: 1,
+          borderRightColor: colors.line,
+        }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 12, paddingHorizontal: 20, paddingTop: 20, paddingBottom: 12 }}>
+          <Image src={logo} style={{ width: 32, height: 32, borderRadius: 8 }} />
+          <View style={{ flex: 1, gap: 1 }}>
+            <Text style={{ fontSize: 16, fontWeight: "600", color: colors.text }}>Gallery</Text>
+            <Text style={{ fontSize: 12, color: colors.muted }}>NSH · {Platform.OS}</Text>
+          </View>
         </View>
-      </View>
-      <Scroll style={{ flex: 1 }}>
-        <View style={{ paddingHorizontal: 12, paddingBottom: 16 }}>
-          <Each of={groups}>
-            {(group) => (
-              <View style={{ gap: 2 }}>
-                <Text style={{ fontSize: 11, fontWeight: "600", color: colors.faint, letterSpacing: 0.6, paddingHorizontal: 10, paddingTop: 16, paddingBottom: 6 }}>
-                  {group().title.toUpperCase()}
-                </Text>
-                <Each of={group().demos}>{(demo) => <SidebarRow demo={demo()} />}</Each>
-              </View>
-            )}
-          </Each>
+        <Scroll style={{ flex: 1 }}>
+          <View style={{ paddingHorizontal: 12, paddingBottom: 16 }}>
+            <Each of={groups}>
+              {(group) => (
+                <View style={{ gap: 2 }}>
+                  <Text style={{ fontSize: 11, fontWeight: "600", color: colors.faint, letterSpacing: 0.6, paddingHorizontal: 10, paddingTop: 16, paddingBottom: 6 }}>
+                    {group().title.toUpperCase()}
+                  </Text>
+                  <Each of={group().demos}>{(demo) => <SidebarRow demo={demo()} />}</Each>
+                </View>
+              )}
+            </Each>
+          </View>
+        </Scroll>
+        <View style={{ paddingHorizontal: 20, paddingVertical: 12, borderTopWidth: 1, borderTopColor: colors.line, gap: 2 }}>
+          <Text style={{ fontSize: 12, color: colors.muted, fontFamily: mono }}>
+            {Math.round(windowSize().width)} × {Math.round(windowSize().height)} pt
+          </Text>
+          <Text style={{ fontSize: 11, color: colors.faint }}>Narrower than 700 pt: the phone layout</Text>
         </View>
-      </Scroll>
-      <View style={{ paddingHorizontal: 20, paddingVertical: 12, borderTopWidth: 1, borderTopColor: colors.line, gap: 2 }}>
-        <Text style={{ fontSize: 12, color: colors.muted, fontFamily: mono }}>
-          {Math.round(windowSize().width)} × {Math.round(windowSize().height)} pt
-        </Text>
-        <Text style={{ fontSize: 11, color: colors.faint }}>Narrower than 700 pt: the phone layout</Text>
       </View>
     </View>
   );
@@ -219,7 +273,7 @@ function Sidebar() {
 
 /** The selected demo under a toolbar with its name and what it shows. */
 function DemoPane() {
-  const group = () => groups.find((g) => g.demos.includes(selected()))!.title;
+  const group = () => groups.find((g) => g.demos.some((demo) => demo.name === selected().name))?.title ?? "Gallery";
   return (
     <View style={{ flex: 1, backgroundColor: colors.background }}>
       <View style={{ height: 64, flexDirection: "row", alignItems: "center", gap: 14, paddingHorizontal: 24, borderBottomWidth: 1, borderBottomColor: colors.line }}>
@@ -254,32 +308,79 @@ function Desktop() {
   const routes = untracked(nav.routes);
   const open = routes.find((r) => r.name === "demo");
   if (open) selected.set(open.demo);
-  if (routes.length > 1) nav.reset([routes[0]]);
+  if (routes.length > 1) nav.setRoutes([routes[0]]);
   wasDesktop.set(true);
+  keymap.bind("mod+b", toggleSidebar);
   return (
-    <View style={{ flex: 1, flexDirection: "row", backgroundColor: colors.background }}>
+    <View style={{ flex: 1, flexDirection: "row", backgroundColor: colors.inset }}>
       <Sidebar />
-      <Stack navigator={nav} style={{ flex: 1 }}>
+      <NavStack state={nav} style={{ flex: 1 }}>
         {(route) => {
           if (route.name !== "page") {
             return (
-              <Screen headerShown={false}>
+              <NavPage headerShown={false}>
                 <DemoPane />
-              </Screen>
+              </NavPage>
             );
           }
           const Page = route.page;
           return <Page />;
         }}
-      </Stack>
+      </NavStack>
     </View>
   );
 }
 
+/** The key of the demo left open, shown again on the next launch. */
+const LAST_DEMO = "lastDemo";
+
+/**
+ * Reopens the demo left open last time (selected on a desktop, pushed on
+ * a phone), then keeps the key current: the demo shown, or none when a
+ * phone is back on the index. A name no demo has any more is ignored.
+ */
+function rememberDemo() {
+  const restored = signal(false);
+  let asked = false;
+  effect(() => {
+    // Once the window has its size, so the layout is the one that stays
+    // (a demo pushed in the phone layout would open again in the desktop's).
+    if (asked || windowSize().width === 0) return;
+    asked = true;
+    Storage.getItem(LAST_DEMO)
+      .then((name) => {
+        const demo = groups.flatMap((g) => g.demos).find((d) => d.name === name);
+        // Only on a fresh start: not over what the user already opened.
+        if (demo && untracked(nav.routes).length === 1) {
+          if (untracked(desktop)) selected.set(demo);
+          else nav.push({ name: "demo", demo });
+        }
+      })
+      .finally(() => restored.set(true));
+  });
+  effect(() => {
+    const open = desktop() ? selected() : nav.routes().find((r) => r.name === "demo")?.demo;
+    if (!restored()) return;
+    if (open) Storage.setItem(LAST_DEMO, open.name);
+    else Storage.removeItem(LAST_DEMO);
+  });
+}
+
 function App() {
+  if (hasWindow) {
+    Window.setTitle("Gallery");
+    Window.setTitleBar("hidden", 40);
+  }
+  rememberDemo();
   return (
-    <View style={{ flex: 1, backgroundColor: colors.background }}>
-      <StatusBar barStyle={isDark() ? "light-content" : "dark-content"} />
+    <View style={{ flex: 1, backgroundColor: colors.inset }}>
+      <TitleBar
+        leading={
+          <If when={desktop()}>
+            <SidebarToggle />
+          </If>
+        }
+      />
       <If when={desktop()} else={<Phone />}>
         <Desktop />
       </If>

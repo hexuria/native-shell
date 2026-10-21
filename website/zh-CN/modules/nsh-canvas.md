@@ -1,16 +1,16 @@
 ---
-title: nsh/canvas
+title: Canvas
 description: Canvas、2D 绘图上下文、Path2D 与渐变，以及 NSH 支持的 HTML Canvas 2D 子集。
-order: 5
+order: 2.3
 demo: mod-canvas
 ---
 
-# nsh/canvas
+# Canvas
 
-`nsh/canvas` 提供与 HTML Canvas 2D 风格一致的绘图上下文。你的 `draw` 函数**记录**绘图操作，平台随后以屏幕分辨率在原生侧回放（iOS 上是 Core Graphics，Android 上是 `android.graphics.Canvas`）。绘图中的数字和颜色可以是[原生值](./nsh-animated.md)：它们做动画时，平台会自行重绘，无需再次运行 `draw`。
+`Canvas` 提供与 HTML Canvas 2D 风格一致的绘图上下文。你的 `draw` 函数**记录**绘图操作，平台随后以屏幕分辨率在原生侧回放（iOS 上是 Core Graphics，Android 上是 `android.graphics.Canvas`）。绘图中的数字和颜色可以是[动画值](./nsh-animated.md)：它们做动画时，平台会自行重绘，无需再次运行 `draw`。
 
 ```ts
-import { Canvas, CanvasGradient, CanvasRenderingContext2D, Path2D } from "nsh/canvas";
+import { Canvas, CanvasGradient, CanvasRenderingContext2D, Path2D } from "nsh";
 ```
 
 教程见[画布](../docs/canvas.md)，属性见 [`<Canvas>`](../elements/canvas.md)。
@@ -21,7 +21,7 @@ import { Canvas, CanvasGradient, CanvasRenderingContext2D, Path2D } from "nsh/ca
 function Canvas(props: CanvasProps): YNode;
 
 interface CanvasProps extends ViewProps {
-  draw: (ctx: CanvasRenderingContext2D, size: CanvasSize) => void;
+  draw: (cx: CanvasRenderingContext2D, size: CanvasSize) => void;
 }
 
 interface CanvasSize {
@@ -34,13 +34,12 @@ interface CanvasSize {
 
 | 属性 | 类型 | 说明 |
 |---|---|---|
-| `draw` | `(ctx, { width, height }) => void` | 绘制画布。尺寸确定后运行一次，之后在它读取的 signal 变化时、以及画布尺寸改变时再次运行。作为数字或颜色传入的原生值做动画时不会触发它。 |
+| `draw` | `(cx, { width, height }) => void` | 绘制画布。尺寸确定后运行一次，之后在它读取的 signal 变化时、以及画布尺寸改变时再次运行。作为数字或颜色传入的动画值做动画时不会触发它。 |
 
 通过样式给画布设置尺寸（`width` / `height`、`flex: 1`、`aspectRatio` 等）。坐标单位为点，原点在左上角。
 
 ```tsx
-import { mount, signal, Text, View } from "nsh";
-import { Canvas } from "nsh/canvas";
+import { Canvas, mount, signal, Text, View } from "nsh";
 
 function App() {
   const values = signal([12, 30, 22, 48, 36, 60, 52, 75]);
@@ -48,15 +47,15 @@ function App() {
     <View style={{ flex: 1, padding: 24 }}>
       <Canvas
         style={{ height: 160 }}
-        draw={(ctx, { width, height }) => {
+        draw={(cx, { width, height }) => {
           const v = values();
           const step = width / (v.length - 1);
-          ctx.strokeStyle = "#6366f1";
-          ctx.lineWidth = 3;
-          ctx.lineJoin = "round";
-          ctx.beginPath();
-          v.forEach((n, i) => (i ? ctx.lineTo(i * step, height - n * 2) : ctx.moveTo(0, height - n * 2)));
-          ctx.stroke();
+          cx.strokeStyle = "#6366f1";
+          cx.lineWidth = 3;
+          cx.lineJoin = "round";
+          cx.beginPath();
+          v.forEach((n, i) => (i ? cx.lineTo(i * step, height - n * 2) : cx.moveTo(0, height - n * 2)));
+          cx.stroke();
         }}
       />
       <Text onPress={() => values.update((v) => [...v.slice(1), Math.random() * 80])}>Next</Text>
@@ -69,25 +68,25 @@ mount(App);
 
 ## 不重绘的动画
 
-所有类型为 `CanvasNumber` 的参数和所有填充/描边样式（`fillStyle`、`strokeStyle`）都接受 `NativeNode`。画布在绘制时读取该节点，并在其动画的每一帧在原生侧重绘：
+所有类型为 `CanvasNumber` 的参数和所有填充/描边样式（`fillStyle`、`strokeStyle`）都接受 `AnimatedNode`。画布在绘制时读取该节点，并在其动画的每一帧在原生侧重绘：
 
 ```tsx
-import { createNativeValue, Easing } from "nsh/animated";
-import { Canvas } from "nsh/canvas";
+import { createAnimatedValue, Easing } from "nsh/animated";
+import { Canvas } from "nsh";
 
-const progress = createNativeValue(0);
+const progress = createAnimatedValue(0);
 
 <Canvas
   style={{ width: 120, height: 120 }}
-  draw={(ctx, { width }) => {
+  draw={(cx, { width }) => {
     const c = width / 2;
-    ctx.lineWidth = 12;
-    ctx.lineCap = "round";
-    ctx.strokeStyle = "#6366f1";
-    ctx.beginPath();
-    // 终止角是原生节点：`progress` 做动画时在原生侧重绘。
-    ctx.arc(c, c, c - 10, -Math.PI / 2, progress.mul(Math.PI * 2).sub(Math.PI / 2));
-    ctx.stroke();
+    cx.lineWidth = 12;
+    cx.lineCap = "round";
+    cx.strokeStyle = "#6366f1";
+    cx.beginPath();
+    // 终止角是动画节点：`progress` 做动画时在原生侧重绘。
+    cx.arc(c, c, c - 10, -Math.PI / 2, progress.mul(Math.PI * 2).sub(Math.PI / 2));
+    cx.stroke();
   }}
 />;
 
@@ -95,8 +94,8 @@ progress.timing(0.75, { duration: 900, easing: Easing.inOut(Easing.cubic) });
 ```
 
 ```ts
-type CanvasNumber = number | NativeNode;
-type CanvasPaint = string | CanvasGradient | NativeNode;
+type CanvasNumber = number | AnimatedNode;
+type CanvasPaint = string | CanvasGradient | AnimatedNode;
 ```
 
 ## CanvasRenderingContext2D
@@ -200,9 +199,9 @@ measureText(text: string): TextMetrics; // { width: number }
 `measureText` 是同步的：它用平台的文本引擎和当前 `font` 测量。只返回 `width`。
 
 ```ts
-ctx.font = "11px system-ui";
+cx.font = "11px system-ui";
 const label = "100";
-ctx.fillText(label, 40 - ctx.measureText(label).width, 20);
+cx.fillText(label, 40 - cx.measureText(label).width, 20);
 ```
 
 ### 渐变
@@ -218,11 +217,11 @@ class CanvasGradient {
 ```
 
 ```ts
-const g = ctx.createLinearGradient(0, 0, 0, height);
+const g = cx.createLinearGradient(0, 0, 0, height);
 g.addColorStop(0, "rgba(99, 102, 241, 0.4)");
 g.addColorStop(1, "rgba(99, 102, 241, 0)");
-ctx.fillStyle = g;
-ctx.fillRect(0, 0, width, height);
+cx.fillStyle = g;
+cx.fillRect(0, 0, width, height);
 ```
 
 ### 图片
@@ -231,7 +230,7 @@ ctx.fillRect(0, 0, width, height);
 drawImage(image: string | ImageAsset | { uri: string }, ...args: CanvasNumber[]): void;
 ```
 
-绘制一张图片，可以是 URL、导入的资源（`import logo from "./logo.png"`）或 `{ uri }`。图片在原生侧加载，加载完成后画布会重新绘制。与 HTML 一样有三种形式：
+绘制一张图片，可以是 URL、导入的资源（`import logo from "./logo.png"`）或 `{ uri }`。图片在原生侧加载，加载完成后画布会重新绘制。导入的资源绘制导入的文件本身；要在所有屏幕上绘制清晰，请导入 `@3x` 文件。与 HTML 一样有三种形式：
 
 - `drawImage(image, dx, dy)`：按原始尺寸绘制。
 - `drawImage(image, dx, dy, dw, dh)`：缩放到矩形内。
@@ -252,11 +251,11 @@ class Path2D {
 
 ```ts
 const heart = new Path2D("M12 21s-7-4.5-9.5-9A5.5 5.5 0 0 1 12 6a5.5 5.5 0 0 1 9.5 6c-2.5 4.5-9.5 9-9.5 9z");
-ctx.save();
-ctx.scale(4, 4);
-ctx.fillStyle = "#ef4444";
-ctx.fill(heart);
-ctx.restore();
+cx.save();
+cx.scale(4, 4);
+cx.fillStyle = "#ef4444";
+cx.fill(heart);
+cx.restore();
 ```
 
 ## 不支持的功能

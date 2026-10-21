@@ -4,49 +4,34 @@
 
 use std::time::Duration;
 
+use nsh_base::{AlertDialogOptions, alert_dialog, dialog};
 use nsh_core::{
+    animation::{Curve, EaseMode},
     keymap::When,
-    nsh_animation::{Curve, EaseMode},
     time::Instant,
-    ui::{AnyElement, Dialog, DialogButton, DialogButtonStyle, prelude::*},
+    ui::{AnyElement, prelude::*},
 };
-use nsh_ui_mobile::{BarStyle, StatusBar, StatusBarProps};
 
 use crate::ui::{
     Badge, Button, ButtonVariant, Card, DemoPage, Figure, Finish, Finished, IconName, IconTile,
-    Inset, MONO, Meter, PressProps, Row, Segment, SegmentedEvent, Stat, ToggleEvent, Tone, appear,
-    caption, colors, icon, inset_shadow, legend, press_with, rgb_a, segmented, tints, toggle,
+    Inset, MONO, Meter, Row, Segment, Stat, Tone, appear, caption, colors, icon, inset_shadow,
+    legend, press, rgb_a, segmented, tints, toggle,
 };
 
 /// The status bar's styles, in the segments' order.
-const BAR_STYLES: [(BarStyle, &str, &str); 3] = [
-    (BarStyle::LightContent, "light-content", "Light"),
-    (BarStyle::DarkContent, "dark-content", "Dark"),
-    (BarStyle::Default, "default", "Default"),
+const BAR_STYLES: [(StatusBarStyle, &str, &str); 3] = [
+    (StatusBarStyle::Light, "light", "Light"),
+    (StatusBarStyle::Dark, "dark", "Dark"),
+    (StatusBarStyle::Default, "auto", "Auto"),
 ];
 
 /// The posts the network card asks for.
 const POSTS: &str = "https://jsonplaceholder.typicode.com/posts?_limit=3";
 
-/// A dialog button.
-fn choice(label: &str, style: DialogButtonStyle) -> DialogButton {
-    DialogButton {
-        text: label.into(),
-        style,
-    }
+/// The label of the action chosen, or `"dismissed"`.
+fn chosen(label: Option<&str>) -> String {
+    label.unwrap_or("dismissed").to_owned()
 }
-
-/// `labels[index]`, or `"dismissed"`.
-fn chosen(labels: &[&str], index: i32) -> String {
-    usize::try_from(index)
-        .ok()
-        .and_then(|i| labels.get(i))
-        .map_or("dismissed", |l| l)
-        .to_owned()
-}
-
-/// The action sheet's options.
-const SHEET_OPTIONS: [&str; 4] = ["Cancel", "Copy link", "Save", "Delete"];
 
 /// A text and the tone it shows in.
 #[derive(Debug, Clone, PartialEq)]
@@ -84,13 +69,17 @@ fn label(content: &'static str) -> Text {
 /// shaded (bound: it follows the window, the insets and the keyboard).
 fn safe_area_diagram() -> AnyElement {
     let width = 76.0;
-    let band = move |pt: f32| px((pt * width / window().width.max(1.0)).round().max(0.0));
+    let band = move |pt: f32| {
+        px((pt * width / window().width.max(px(1.0)).0)
+            .round()
+            .max(0.0))
+    };
     view()
         .w(px(width))
-        .h(move || px((window().height * width / window().width.max(1.0)).round()))
+        .h(move || px((window().height * width / window().width.max(px(1.0))).round()))
         .rounded(px(14.0))
         .border_curve(BorderCurve::Continuous)
-        .border(1.5)
+        .border(px(1.5))
         .border_color(colors::BORDER)
         .bg(colors::SURFACE)
         .finish_fill(Finish::Card)
@@ -99,7 +88,7 @@ fn safe_area_diagram() -> AnyElement {
             [inset_shadow(1.0, 0.0, rgb_a(0xffffff, 0.06))],
         )
         .overflow_hidden()
-        .child(view().h(move || band(safe_area().top)).bg(tints::INFO))
+        .child(view().h(move || band(safe_area().top.0)).bg(tints::INFO))
         .child(
             view()
                 .flex_1()
@@ -109,8 +98,8 @@ fn safe_area_diagram() -> AnyElement {
                 .border_color(colors::LINE)
                 .border_dashed(),
         )
-        .child(view().h(move || band(keyboard_height())).bg(tints::WARN))
-        .child(view().h(move || band(safe_area().bottom)).bg(tints::INFO))
+        .child(view().h(move || band(keyboard_height().0)).bg(tints::WARN))
+        .child(view().h(move || band(safe_area().bottom.0)).bg(tints::INFO))
         .into_element()
 }
 
@@ -118,16 +107,16 @@ fn safe_area_diagram() -> AnyElement {
 fn environment() -> AnyElement {
     type Edge = fn(EdgeInsets) -> f32;
     let insets: [(&str, Edge); 4] = [
-        ("Top", |i| i.top),
-        ("Right", |i| i.right),
-        ("Bottom", |i| i.bottom),
-        ("Left", |i| i.left),
+        ("Top", |i| i.top.0),
+        ("Right", |i| i.right.0),
+        ("Bottom", |i| i.bottom.0),
+        ("Left", |i| i.left.0),
     ];
     let insets = insets.map(|(label, value)| {
         Stat::new(label, move || value(safe_area()).round().to_string()).width(0.25)
     });
     let keyboard_stat =
-        || Stat::new("Keyboard", || format!("{} pt", keyboard_height().round())).width(0.5);
+        || Stat::new("Keyboard", || format!("{} pt", keyboard_height().0.round())).width(0.5);
     Card::new()
         .icon(IconName::System)
         .title("Environment")
@@ -146,7 +135,11 @@ fn environment() -> AnyElement {
                             view().gap(px(2.0)).child(label("Window")).child(
                                 Figure::new(|| {
                                     let window = window();
-                                    format!("{} × {}", window.width.round(), window.height.round())
+                                    format!(
+                                        "{} × {}",
+                                        window.width.0.round(),
+                                        window.height.0.round()
+                                    )
                                 })
                                 .unit("pt"),
                             ),
@@ -155,8 +148,8 @@ fn environment() -> AnyElement {
                             view()
                                 .flex_row()
                                 .child(
-                                    If::new(
-                                        || keyboard_height() > 0.0,
+                                    when(
+                                        || keyboard_height() > px(0.0),
                                         move || keyboard_stat().tone(Tone::Warn),
                                     )
                                     .otherwise(keyboard_stat),
@@ -201,35 +194,73 @@ fn environment() -> AnyElement {
 }
 
 /// The status bar: its style (following the appearance until one is
-/// picked) and whether it is hidden.
+/// picked) and whether it is hidden, shown by a dialog's `status_bar`
+/// while it is open (over the page's).
 #[component]
 fn StatusBarCard() -> impl IntoElement {
     // The style the user picked.
     let picked = signal(None::<usize>);
     let hidden = signal(false);
+    let open = signal(false);
     // Until one is picked, the style follows the appearance (light text
     // on the dark page).
     let index = computed(move || picked.get().unwrap_or(if dark() { 0 } else { 1 }));
+    let preview = when(open, move || {
+        // The background its content is for.
+        let backdrop = move || match index.get() {
+            0 => AdaptiveColor::from(rgb(0x101113)),
+            1 => AdaptiveColor::from(rgb(0xf4f4f2)),
+            _ => colors::BACKGROUND,
+        };
+        let ink = move || {
+            if index.get() == 0 {
+                AdaptiveColor::from(rgb(0xffffff))
+            } else {
+                AdaptiveColor::from(rgb(0x111214))
+            }
+        };
+        dialog()
+            .animation(ModalAnimation::Fade)
+            .status_bar(move || {
+                StatusBarSetting::default()
+                    .foreground(BAR_STYLES[index.get()].0)
+                    .hidden(hidden.get())
+                    .animated(true)
+            })
+            .on_cancel(move || open.set(false))
+            .child(
+                view()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .gap_4()
+                    .bg(backdrop)
+                    .child(
+                        text(move || {
+                            format!(
+                                "statusBar: {{ foreground: \"{}\", hidden: {} }}",
+                                BAR_STYLES[index.get()].1,
+                                hidden.get()
+                            )
+                        })
+                        .text_size(px(13.0))
+                        .text_color(ink)
+                        .font_family(MONO),
+                    )
+                    .child(Button::new("Close", move |_: &()| open.set(false))),
+            )
+    });
     Card::new()
         .icon(IconName::Mobile)
         .title("Status bar")
-        .subtitle("StatusBar: style and visibility, animated")
-        .child(StatusBar::element(StatusBarProps {
-            bar_style: Prop::bind(move || Some(BAR_STYLES[index.get()].0)),
-            hidden: Prop::bind(move || Some(hidden.get())),
-            animated: Some(true).into(),
-            android: None.into(),
-            web: None.into(),
-        }))
+        .subtitle("A dialog's statusBar: over the page's while it is open")
         .child(
-            segmented(
-                BAR_STYLES.map(|(_, _, label)| Segment::new(label)),
-                Prop::bind(move || index.get() as u32),
-            )
-            .on_event(move |event: &SegmentedEvent| {
-                let SegmentedEvent::Change(i) = *event;
-                picked.set(Some(i as usize));
-            }),
+            segmented()
+                .options(BAR_STYLES.map(|(_, _, label)| Segment::new(label)))
+                .selected(move || index.get() as u32)
+                .on_change(move |&i: &u32| {
+                    picked.set(Some(i as usize));
+                }),
         )
         .child(
             Row::new(false)
@@ -239,19 +270,23 @@ fn StatusBarCard() -> impl IntoElement {
                         .gap(px(2.0))
                         .child(text("Hidden").text_size(px(15.0)).text_color(colors::TEXT))
                         .child(
-                            text(move || format!("barStyle: \"{}\"", BAR_STYLES[index.get()].1))
+                            text(move || format!("foreground: \"{}\"", BAR_STYLES[index.get()].1))
                                 .text_size(px(12.0))
                                 .text_color(colors::MUTED)
                                 .font_family(MONO),
                         ),
                 )
-                .child(toggle(hidden, "Hide the status bar").on_event(
-                    move |event: &ToggleEvent| {
-                        let ToggleEvent::Change(on) = *event;
-                        hidden.set(on);
-                    },
-                )),
+                .child(
+                    toggle()
+                        .value(hidden)
+                        .label("Hide the status bar")
+                        .on_change(move |&on: &bool| {
+                            hidden.set(on);
+                        }),
+                ),
         )
+        .child(Button::new("Preview", move |_: &()| open.set(true)).icon(IconName::Mobile))
+        .child(preview)
 }
 
 /// A tappable row with an icon tile, a title, a detail and a chevron.
@@ -263,28 +298,30 @@ fn action_row(
     detail: &'static str,
     on_press: impl Into<Listener<()>>,
 ) -> AnyElement {
-    press_with(
-        PressProps {
-            scale: 0.98.into(),
-            label: Some(title.into()).into(),
-            ..PressProps::default()
-        },
-        on_press,
-    )
-    .child(
-        Row::new(first)
-            .child(IconTile::new(name).tint(tint).size(34.0))
-            .child(
-                view()
-                    .flex_1()
-                    .gap(px(1.0))
-                    .py_2()
-                    .child(text(title).text_size(px(15.0)).text_color(colors::TEXT))
-                    .child(text(detail).text_size(px(12.0)).text_color(colors::MUTED)),
-            )
-            .child(icon(IconName::Chevron, 14.0, colors::FAINT)),
-    )
-    .into_element()
+    let on_press: Listener<()> = on_press.into();
+    press()
+        .scale(0.98)
+        .label(title)
+        .on_press(on_press)
+        .child(
+            Row::new(first)
+                .child(IconTile::new(name).tint(tint).size(34.0))
+                .child(
+                    view()
+                        .flex_1()
+                        .gap(px(1.0))
+                        .py_2()
+                        .child(text(title).text_size(px(15.0)).text_color(colors::TEXT))
+                        .child(text(detail).text_size(px(12.0)).text_color(colors::MUTED)),
+                )
+                .child(
+                    icon()
+                        .name(IconName::Chevron)
+                        .size(14.0)
+                        .tint(colors::FAINT),
+                ),
+        )
+        .into_element()
 }
 
 /// System dialogs and a toast; the last answer pops in.
@@ -293,141 +330,91 @@ fn Dialogs() -> impl IntoElement {
     // What the last dialog answered.
     let answer = signal(None::<Toned>);
     // Pops the answer in each time it changes.
-    let pop = native_value(1.0);
+    let pop = animated_value(1.0);
     let owner = Owner::current();
-    // Shows `dialog`, then what `answered` makes of the index chosen (-1:
+    // Shows `dialog`, then what `answered` makes of the label chosen (none:
     // dismissed), popping it in.
-    let ask = {
-        let pop = pop.clone();
-        move |dialog: Dialog, answered: fn(i32) -> Toned| {
-            let chosen = nsh_core::ui::prelude::dialog(dialog);
-            let pop = pop.clone();
-            owner.run(|| {
-                spawn(async move {
-                    let index = chosen.await;
-                    answer.set(Some(answered(index)));
-                    pop.set(0.85);
-                    pop.spring(
-                        1.0,
-                        Spring {
-                            stiffness: 380.0,
-                            damping: 18.0,
-                            ..Spring::default()
-                        },
-                    );
-                })
-            });
-        }
-    };
-    let alert = {
-        let ask = ask.clone();
-        move |_: &()| {
-            let dialog = Dialog {
-                id: 0,
-                title: Some("Saved".into()),
-                message: Some("Your changes were saved.".into()),
-                buttons: vec![choice("OK", DialogButtonStyle::Default)],
-                cancelable: false,
-                sheet: false,
-            };
-            ask(dialog, |_| Toned {
-                text: "OK".to_owned(),
-                tone: Tone::Up,
-            });
-        }
-    };
-    let confirm = {
-        let ask = ask.clone();
-        move |_: &()| {
-            let dialog = Dialog {
-                id: 0,
-                title: Some("Delete the photo?".into()),
-                message: Some("This cannot be undone.".into()),
-                buttons: vec![
-                    choice("Cancel", DialogButtonStyle::Cancel),
-                    choice("Delete", DialogButtonStyle::Destructive),
-                ],
-                cancelable: true,
-                sheet: false,
-            };
-            ask(dialog, |i| {
-                let text = chosen(&["Cancel", "Delete"], i);
-                Toned {
-                    tone: if text == "Delete" {
-                        Tone::Danger
-                    } else {
-                        Tone::Neutral
+    let ask = move |dialog: AlertDialogOptions, answered: fn(Option<&str>) -> Toned| {
+        let chosen = dialog.show();
+        owner.run(|| {
+            spawn(async move {
+                let label = chosen.await.ok().flatten();
+                answer.set(Some(answered(label.as_deref())));
+                pop.set(0.85);
+                pop.spring(
+                    1.0,
+                    Spring {
+                        stiffness: 380.0,
+                        damping: 18.0,
+                        ..Spring::default()
                     },
-                    text,
-                }
-            });
-        }
-    };
-    let three = {
-        let ask = ask.clone();
-        move |_: &()| {
-            let dialog = Dialog {
-                id: 0,
-                title: Some("Update available".into()),
-                message: Some("Install it now?".into()),
-                buttons: vec![
-                    choice("Later", DialogButtonStyle::Default),
-                    choice("Never", DialogButtonStyle::Cancel),
-                    choice("Install", DialogButtonStyle::Default),
-                ],
-                cancelable: false,
-                sheet: false,
-            };
-            ask(dialog, |i| {
-                let text = chosen(&["Later", "Never", "Install"], i);
-                Toned {
-                    tone: if text == "Install" {
-                        Tone::Info
-                    } else {
-                        Tone::Neutral
-                    },
-                    text,
-                }
-            });
-        }
-    };
-    let sheet = move |_: &()| {
-        let dialog = Dialog {
-            id: 0,
-            title: Some("Share the photo".into()),
-            message: None,
-            buttons: SHEET_OPTIONS
-                .iter()
-                .enumerate()
-                .map(|(i, option)| {
-                    choice(
-                        option,
-                        match i {
-                            0 => DialogButtonStyle::Cancel,
-                            3 => DialogButtonStyle::Destructive,
-                            _ => DialogButtonStyle::Default,
-                        },
-                    )
-                })
-                .collect(),
-            cancelable: true,
-            sheet: true,
-        };
-        // Dismissing the sheet is its cancel action (as `ActionSheet.show`
-        // answers).
-        ask(dialog, |i| {
-            let text = chosen(&SHEET_OPTIONS, i.max(0));
-            Toned {
-                tone: if text == "Delete" {
-                    Tone::Danger
-                } else {
-                    Tone::Accent
-                },
-                text,
-            }
+                );
+            })
         });
     };
-    let shown = If::new(
+    let alert = move |_: &()| {
+        let dialog = alert_dialog()
+            .title("Saved")
+            .description("Your changes were saved.")
+            .action("OK");
+        ask(dialog, |_| Toned {
+            text: "OK".to_owned(),
+            tone: Tone::Up,
+        });
+    };
+    let confirm = move |_: &()| {
+        let dialog = alert_dialog()
+            .title("Delete the photo?")
+            .description("This cannot be undone.")
+            .cancel("Cancel")
+            .destructive("Delete")
+            .close_on_escape(true)
+            .close_on_backdrop_press(true);
+        ask(dialog, |label| Toned {
+            tone: if label == Some("Delete") {
+                Tone::Danger
+            } else {
+                Tone::Neutral
+            },
+            text: chosen(label),
+        });
+    };
+    let three = move |_: &()| {
+        let dialog = alert_dialog()
+            .title("Update available")
+            .description("Install it now?")
+            .action("Later")
+            .cancel("Never")
+            .action("Install");
+        ask(dialog, |label| Toned {
+            tone: if label == Some("Install") {
+                Tone::Info
+            } else {
+                Tone::Neutral
+            },
+            text: chosen(label),
+        });
+    };
+    let sheet = move |_: &()| {
+        let dialog = alert_dialog()
+            .title("Share the photo")
+            .action_sheet()
+            .cancel("Cancel")
+            .action("Copy link")
+            .action("Save")
+            .destructive("Delete");
+        // Dismissing the sheet is its cancel action (as `ActionSheet.show`
+        // answers).
+        ask(dialog, |label| Toned {
+            tone: if label == Some("Delete") {
+                Tone::Danger
+            } else {
+                Tone::Accent
+            },
+            text: label.unwrap_or("Cancel").to_owned(),
+        });
+    };
+    let shown = when(
         move || answer.with(Option::is_some),
         move || {
             view().bind_scale(&pop).child(
@@ -518,15 +505,12 @@ fn FramesAndTimers() -> impl IntoElement {
     // Seconds since the page opened, counted by an interval.
     let ticks = signal(0_u32);
     // Flashes the beat dot once per tick (the fade runs natively).
-    let beat = native_value(0.0);
-    {
-        let beat = beat.clone();
-        set_interval(Duration::from_secs(1), move || {
-            ticks.update(|t| *t += 1);
-            beat.set(1.0);
-            beat.timing(0.0, 700.0, Easing::Curve(Curve::Quad, EaseMode::Out));
-        });
-    }
+    let beat = animated_value(0.0);
+    set_interval(Duration::from_secs(1), move || {
+        ticks.update(|t| *t += 1);
+        beat.set(1.0);
+        beat.timing(0.0, 700.0, Easing::Curve(Curve::Quad, EaseMode::Out));
+    });
     // Counts the display frames while it runs ("Count frames").
     let frames = stored(None::<Spawned<()>>);
     let running = signal(false);
@@ -679,56 +663,62 @@ fn FramesAndTimers() -> impl IntoElement {
 /// Three posts loaded over HTTP, and a log line.
 #[component]
 fn Network() -> impl IntoElement {
-    // The posts loaded: id and title.
-    let posts = signal(Vec::<(u64, String)>::new());
-    // How the last request went.
-    let status = signal(None::<Toned>);
-    // A request is in progress.
-    let loading = signal(false);
-    let owner = Owner::current();
-    // Loads three posts (TS: `fetch`) with the engine's network stack: the
+    // Loads once asked, and again on each press after (TS: `resource`): it
+    // keeps the posts while it loads again, and a failure next to them. The
+    // request goes with the engine's network stack (TS: `fetch`): the
     // platform's, or the browser's on the web.
-    let load = move |_: &()| {
-        batch(|| {
-            status.set(Some(Toned {
+    let asked = signal(false);
+    let result = resource(
+        move || asked.get().then_some(()),
+        |(), _| async move {
+            let started = Instant::now();
+            let response = fetch(POSTS).await?;
+            let (code, posts) = (response.status(), parse_posts(&response.text())?);
+            let ms = started.elapsed().as_millis();
+            Ok::<_, String>((code, posts, ms))
+        },
+    );
+    // The posts loaded: id and title.
+    let posts = computed(move || {
+        result
+            .with(|r| r.map(|(_, posts, _)| posts.clone()))
+            .unwrap_or_default()
+    });
+    // How the last request went.
+    let status = computed(move || {
+        if result.loading() {
+            return Some(Toned {
                 text: "loading…".to_owned(),
                 tone: Tone::Neutral,
-            }));
-            loading.set(true);
-        });
-        owner.run(|| {
-            spawn(async move {
-                let started = Instant::now();
-                let result = fetch(POSTS)
-                    .await
-                    .map(|response| (response.status(), response.text()));
-                let ms = started.elapsed().as_millis();
-                batch(|| {
-                    loading.set(false);
-                    status.set(Some(
-                        match result.and_then(|(code, body)| Ok((code, parse_posts(&body)?))) {
-                            Ok((code, loaded)) => {
-                                posts.set(loaded);
-                                Toned {
-                                    text: format!("HTTP {code} · {ms} ms"),
-                                    tone: if (200..300).contains(&code) {
-                                        Tone::Up
-                                    } else {
-                                        Tone::Danger
-                                    },
-                                }
-                            }
-                            Err(error) => Toned {
-                                text: error,
-                                tone: Tone::Danger,
-                            },
-                        },
-                    ));
-                });
+            });
+        }
+        if let Some(error) = result.error() {
+            return Some(Toned {
+                text: error,
+                tone: Tone::Danger,
+            });
+        }
+        result.with(|r| {
+            r.map(|(code, _, ms)| Toned {
+                text: format!("HTTP {code} · {ms} ms"),
+                tone: if (200..300).contains(code) {
+                    Tone::Up
+                } else {
+                    Tone::Danger
+                },
             })
-        });
+        })
+    });
+    // A request is in progress.
+    let loading = computed(move || result.loading());
+    let load = move |_: &()| {
+        if asked.get_untracked() {
+            result.refetch();
+        } else {
+            asked.set(true);
+        }
     };
-    let list = If::new(
+    let list = when(
         move || posts.with(Vec::is_empty),
         || {
             caption(
@@ -738,7 +728,7 @@ fn Network() -> impl IntoElement {
         },
     )
     .otherwise(move || {
-        view().child(Each::new(
+        view().child(each(
             move || {
                 posts.with(|p| {
                     p.iter()
@@ -750,7 +740,7 @@ fn Network() -> impl IntoElement {
             |(_, (id, _))| *id,
             |post, _| {
                 let i = post.with_untracked(|(i, _)| *i);
-                appear(i as u32).child(
+                appear().index(i as u32).child(
                     Row::new(i == 0)
                         .child(
                             text(move || post.with(|(_, (id, _))| format!("#{id}")))
@@ -908,9 +898,9 @@ fn Shortcuts() -> impl IntoElement {
 pub(crate) fn System() -> impl IntoElement {
     DemoPage::new()
         .card(environment)
-        .card(|| StatusBarCard::element(()))
-        .card(|| Dialogs::element(()))
-        .card(|| FramesAndTimers::element(()))
-        .card(|| Shortcuts::element(()))
-        .card(|| Network::element(()))
+        .card(status_bar_card)
+        .card(dialogs)
+        .card(frames_and_timers)
+        .card(shortcuts)
+        .card(network)
 }

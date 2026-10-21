@@ -13,12 +13,8 @@ workspace = true
 env_logger.workspace = true
 log.workspace = true
 nsh-core.workspace = true
-nsh-ui-mobile.workspace = true
+nsh-base.workspace = true
 serde_json.workspace = true
-
-[dev-dependencies]
-nsh-engine.workspace = true
-crossbeam-channel.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nsh-platform-linux.workspace = true

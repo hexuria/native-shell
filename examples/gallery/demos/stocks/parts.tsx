@@ -1,6 +1,5 @@
-import { effect, type JSX, type PanActivation, Text, type TouchProps, untracked, View } from "nsh";
-import { Animated, createNativeValue, Easing, type NativeNode } from "nsh/animated";
-import type { CanvasRenderingContext2D } from "nsh/canvas";
+import { type CanvasRenderingContext2D, effect, type JSX, type PanActivation, Text, type TouchProps, untracked, View } from "nsh";
+import { Animated, createAnimatedValue, Easing, type AnimatedNode } from "nsh/animated";
 import { PanResponder } from "nsh/gesture";
 import { alpha, colors, isDark } from "../../ui";
 import type { Quote } from "./market";
@@ -10,8 +9,8 @@ import type { Quote } from "./market";
  * on the UI thread: JS only kicks the value, it never animates it. Read it
  * in the style: the colors follow the appearance.
  */
-export function flash(quote: () => Quote): () => NativeNode {
-  const v = createNativeValue(0);
+export function flash(quote: () => Quote): () => AnimatedNode {
+  const v = createAnimatedValue(0);
   let seen = untracked(quote).changedAt;
   effect(() => {
     const q = quote();
@@ -32,8 +31,8 @@ export function flash(quote: () => Quote): () => NativeNode {
  * An opacity that dips and recovers natively when the quote changes: a
  * blink on the price text, no background.
  */
-export function blink(quote: () => Quote): NativeNode {
-  const v = createNativeValue(1);
+export function blink(quote: () => Quote): AnimatedNode {
+  const v = createAnimatedValue(1);
   let seen = untracked(quote).changedAt;
   effect(() => {
     const q = quote();
@@ -50,7 +49,7 @@ export function blink(quote: () => Quote): NativeNode {
  * ring that grows and fades around a live dot.
  */
 export function pulse(running: () => boolean) {
-  const v = createNativeValue(0);
+  const v = createAnimatedValue(0);
   const loop = Animated.loop(Animated.timing(v, { toValue: 1, duration: 1400, easing: Easing.out(Easing.cubic) }));
   effect(() => {
     if (running()) loop.start();
@@ -102,33 +101,33 @@ export function scrub(at: (x: number | null) => void): TouchProps & { panActivat
 }
 
 /** Diagonal stripes over a rectangle (projections, zones). */
-export function hatch(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, color: string, gap = 6) {
+export function hatch(cx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, color: string, gap = 6) {
   if (w <= 0 || h <= 0) return;
-  ctx.save();
-  ctx.beginPath();
-  ctx.rect(x, y, w, h);
-  ctx.clip();
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
+  cx.save();
+  cx.beginPath();
+  cx.rect(x, y, w, h);
+  cx.clip();
+  cx.strokeStyle = color;
+  cx.lineWidth = 1;
+  cx.beginPath();
   for (let i = -h; i < w; i += gap) {
-    ctx.moveTo(x + i, y + h);
-    ctx.lineTo(x + i + h, y);
+    cx.moveTo(x + i, y + h);
+    cx.lineTo(x + i + h, y);
   }
-  ctx.stroke();
-  ctx.restore();
+  cx.stroke();
+  cx.restore();
 }
 
 /** A dashed horizontal line. */
-export function dashed(ctx: CanvasRenderingContext2D, x0: number, x1: number, y: number, color: string, dash = [3, 4]) {
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 1;
-  ctx.setLineDash(dash);
-  ctx.beginPath();
-  ctx.moveTo(x0, y);
-  ctx.lineTo(x1, y);
-  ctx.stroke();
-  ctx.setLineDash([]);
+export function dashed(cx: CanvasRenderingContext2D, x0: number, x1: number, y: number, color: string, dash = [3, 4]) {
+  cx.strokeStyle = color;
+  cx.lineWidth = 1;
+  cx.setLineDash(dash);
+  cx.beginPath();
+  cx.moveTo(x0, y);
+  cx.lineTo(x1, y);
+  cx.stroke();
+  cx.setLineDash([]);
 }
 
 export { alpha };
@@ -141,7 +140,7 @@ export const grid = () => (isDark() ? colors.line : colors.border);
  * native spring: the bar is the track's width and slides in, clipped.
  */
 export function SpringBar(props: { share: () => number; color: string; from?: "left" | "right"; height?: number; radius?: number }) {
-  const x = createNativeValue(0);
+  const x = createAnimatedValue(0);
   let width = 0;
   let placed = false;
   const place = () => {

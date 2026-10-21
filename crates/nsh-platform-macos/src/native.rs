@@ -42,8 +42,8 @@ use std::{
 
 use block2::RcBlock;
 use nsh_core::{
-    Command, EventKind, EventPayload, JsonValue, NativeProps, NodeId, PayloadValue, Rect,
-    ResizeMode, Size, VideoProps, ViewKind, WebProps, WebSource,
+    Bounds, Command, EventKind, EventPayload, JsonValue, NativeProps, NodeId, PayloadValue, Points,
+    ResizeMode, Size, VideoProps, ViewKind, WebProps, WebSource, geometry::Point,
 };
 use nsh_engine::{Access, App, EngineControl, Policy};
 use objc2::{
@@ -144,7 +144,7 @@ impl ComponentContext {
     /// dimension open.
     pub fn set_size(&self, width: f32, height: f32) {
         self.control
-            .set_component_size(self.id, Size::new(width, height));
+            .set_component_size(self.id, Size::new(Points(width), Points(height)));
     }
 }
 
@@ -310,7 +310,7 @@ pub(crate) fn resized(view: &NshView) {
     ) {
         return;
     }
-    let rect = bounds(s.frame.width, s.frame.height);
+    let rect = bounds(s.frame.size.width.0, s.frame.size.height.0);
     for native in &mut s.natives {
         native.rect = rect;
     }
@@ -628,15 +628,19 @@ fn put_component(surface: &Surface, id: NodeId, component: Box<dyn NativeCompone
 /// Hosts `native` in `view`, filling it ([`resized`] keeps it so).
 fn fill(view: &NshView, native: &NSView) {
     let frame = view.state().frame;
-    view.set_native(native, bounds(frame.width, frame.height));
+    view.set_native(native, bounds(frame.size.width.0, frame.size.height.0));
 }
 
-fn bounds(width: f32, height: f32) -> Rect {
-    Rect {
-        x: 0.0,
-        y: 0.0,
-        width,
-        height,
+fn bounds(width: f32, height: f32) -> Bounds<Points> {
+    Bounds {
+        origin: Point {
+            x: Points(0.0),
+            y: Points(0.0),
+        },
+        size: Size {
+            width: Points(width),
+            height: Points(height),
+        },
     }
 }
 
@@ -1350,6 +1354,11 @@ impl WebHost {
                     configuration: &*config
                 ];
                 let _: () = msg_send![&web, setNavigationDelegate: &*handler];
+                // Transparent by default (WebKit paints white otherwise): a
+                // page without a background shows the view behind it, the
+                // way `backgroundColor` on the node expects.
+                let no: Retained<AnyObject> = msg_send![class(c"NSNumber")?, numberWithBool: false];
+                let _: () = msg_send![&web, setValue: &*no, forKey: &*NSString::from_str("drawsBackground")];
                 crate::surface::quiet(|| fill(view, as_view(&web)));
                 Some(web)
             }

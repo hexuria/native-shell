@@ -67,6 +67,7 @@ use crate::{
         Composite, Drawing, FillRule, GradientShape, LineCap, LineJoin, Num, Paint, Path, PathOp,
         parse_svg_path,
     },
+    geometry::{Bounds, Percentage, Points, Radians, ScaledPixels, point, size},
     style::{Color, FontVariant},
     ui::TsTypes,
 };
@@ -90,7 +91,7 @@ pub fn decode<L: HostList<Item: HostInput>>(
     Ok(drawing)
 }
 
-/// A constant, or a native value the canvas reads while it draws (a slot
+/// A constant, or an animated value the canvas reads while it draws (a slot
 /// of the drawing); anything else is 0.
 impl OpArg<Drawing> for Num {
     #[inline]
@@ -102,7 +103,7 @@ impl OpArg<Drawing> for Num {
         if let Some(n) = v.as_number() {
             return Ok(Some(Num::Const(n as f32)));
         }
-        Ok(Some(match v.native_node() {
+        Ok(Some(match v.animated_node() {
             Some(node) => Num::Slot(drawing.slot(node)),
             None => Num::Const(0.0),
         }))
@@ -144,7 +145,7 @@ impl OpArg<Drawing> for Option<Path> {
     }
 }
 
-/// A color, a native value interpolating colors, or a gradient
+/// A color, an animated value interpolating colors, or a gradient
 /// (`[kind, ...geometry, [offset, color, ...]]`); anything else drops the
 /// operation.
 impl OpArg<Drawing> for Paint {
@@ -156,20 +157,39 @@ impl OpArg<Drawing> for Paint {
         if let Some(s) = v.as_string() {
             return Ok(Color::parse(&s).map(Paint::Color));
         }
-        if let Some(node) = v.native_node() {
+        if let Some(node) = v.animated_node() {
             return Ok(Some(Paint::Slot(drawing.slot(node))));
         }
         let Some(list) = v.as_list() else {
             return Ok(None);
         };
         let n = |i: usize| list.item(i).and_then(|x| x.as_number()).unwrap_or(0.0) as f32;
+        let p = |i: usize| Points(n(i));
+        let at = |i: usize| point(p(i), p(i + 1));
         let (shape, stops_at) = match list.item(0).and_then(|k| k.as_number()) {
-            Some(0.0) => (GradientShape::Linear([n(1), n(2), n(3), n(4)]), 5),
+            Some(0.0) => (
+                GradientShape::Linear {
+                    start: at(1),
+                    end: at(3),
+                },
+                5,
+            ),
             Some(1.0) => (
-                GradientShape::Radial([n(1), n(2), n(3), n(4), n(5), n(6)]),
+                GradientShape::Radial {
+                    start: at(1),
+                    start_radius: p(3),
+                    end: at(4),
+                    end_radius: p(6),
+                },
                 7,
             ),
-            Some(2.0) => (GradientShape::Conic([n(1), n(2), n(3)]), 4),
+            Some(2.0) => (
+                GradientShape::Conic {
+                    start_angle: Radians(n(1)),
+                    center: at(2),
+                },
+                4,
+            ),
             _ => return Ok(None),
         };
         let mut stops = Vec::new();
@@ -182,13 +202,13 @@ impl OpArg<Drawing> for Paint {
                     .and_then(|c| c.as_string())
                     .and_then(|c| Color::parse(&c));
                 if let Some(color) = color {
-                    stops.push((offset.clamp(0.0, 1.0), color));
+                    stops.push((Percentage(offset.clamp(0.0, 1.0)), color));
                 }
                 i += 2;
             }
         }
         // Stops apply in offset order (equal offsets keep their order).
-        stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+        stops.sort_by(|a, b| a.0.0.total_cmp(&b.0.0));
         Ok(Some(Paint::Gradient(Arc::new(CanvasGradient {
             shape,
             stops,
@@ -216,7 +236,7 @@ impl OpArg<Drawing> for CanvasImage {
 }
 
 /// `drawImage`'s source rectangle `[sx, sy, sw, sh]`, or the whole image.
-impl OpArg<Drawing> for Option<[f32; 4]> {
+impl OpArg<Drawing> for Option<Bounds<ScaledPixels>> {
     fn read<L: HostList<Item: HostInput>>(
         r: &mut OpReader<'_, L>,
         _: &mut Drawing,
@@ -228,7 +248,11 @@ impl OpArg<Drawing> for Option<[f32; 4]> {
         for (i, o) in out.iter_mut().enumerate().take(v.len()) {
             *o = v.item(i).and_then(|n| n.as_number()).unwrap_or(0.0) as f32;
         }
-        Ok(Some(Some(out)))
+        let [x, y, w, h] = out.map(ScaledPixels);
+        Ok(Some(Some(Bounds {
+            origin: point(x, y),
+            size: size(w, h),
+        })))
     }
 
     fn ts(_: &mut TsTypes) -> String {
@@ -319,7 +343,9 @@ pub(crate) fn line_dash<L: HostList<Item: HostInput>>(
     if dash.len() % 2 == 1 {
         dash.extend_from_within(..);
     }
-    Ok(Some(CanvasOp::LineDash(dash.into())))
+    Ok(Some(CanvasOp::LineDash(
+        dash.into_iter().map(Points).collect(),
+    )))
 }
 
 /// The declarations of the recording methods and properties (`nsh/canvas`
@@ -332,9 +358,9 @@ pub fn declarations() -> String {
     CanvasOp::methods(&mut types, &mut context);
     CanvasOp::properties(&mut types, &mut properties);
     let mut out = String::from(
-        "/** A number in a drawing: a constant, or a native value the canvas reads\n \
+        "/** A number in a drawing: a constant, or an animated value the canvas reads\n \
          * while it draws (its animations redraw natively, without JS). */\n\
-         export type CanvasNumber = number | NativeNode;\n",
+         export type CanvasNumber = number | AnimatedNode;\n",
     );
     for declaration in types.declarations() {
         let _ = write!(out, "\n{declaration}\n");

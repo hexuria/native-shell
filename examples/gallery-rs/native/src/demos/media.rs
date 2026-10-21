@@ -6,9 +6,8 @@
 use nsh_core::ui::prelude::*;
 
 use crate::ui::{
-    Badge, Button, ButtonVariant, Card, DemoPage, Finish, Finished, IconName, Meter, PressProps,
-    RoundButton, Segment, SegmentedEvent, Tone, caption, colors, icon, press_with, radius,
-    segmented,
+    Badge, Button, ButtonVariant, Card, DemoPage, Finish, Finished, IconName, Meter, RoundButton,
+    Segment, Tone, caption, colors, icon, press, radius, segmented,
 };
 
 /// The web site of the second web view.
@@ -18,8 +17,8 @@ const SITE: &str = "https://nsh.dev";
 const FLOWER: &str = "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4";
 
 /// `color` as CSS's `#rrggbb`.
-fn css(color: Color) -> String {
-    format!("#{:06x}", color.0 >> 8)
+fn css(color: Hsla) -> String {
+    color.alpha(1.0).to_hex().to_ascii_lowercase()
 }
 
 /// The inline page in the gallery's colors for the appearance shown (the
@@ -96,7 +95,6 @@ fn Site() -> impl IntoElement {
     // The web site's last navigation state.
     let state = signal(None::<WebNavigation>);
     let loading = computed(move || state.with(|s| s.as_ref().is_some_and(|s| s.loading)));
-    let (back, forward, reload) = (site.clone(), site.clone(), site.clone());
     Card::new()
         .icon(IconName::Search)
         .title("A web site")
@@ -156,17 +154,17 @@ fn Site() -> impl IntoElement {
                     true,
                     "Back",
                     move || state.with(|s| s.as_ref().is_some_and(|s| s.can_go_back)),
-                    move |_: &()| back.go_back(),
+                    move |_: &()| site.go_back(),
                 ))
                 .child(nav_button(
                     false,
                     "Forward",
                     move || state.with(|s| s.as_ref().is_some_and(|s| s.can_go_forward)),
-                    move |_: &()| forward.go_forward(),
+                    move |_: &()| site.go_forward(),
                 ))
                 .child(view().flex_1())
                 .child(
-                    Button::new("Reload", move |_: &()| reload.reload())
+                    Button::new("Reload", move |_: &()| site.reload())
                         .variant(ButtonVariant::Secondary),
                 ),
         )
@@ -176,7 +174,6 @@ fn Site() -> impl IntoElement {
 #[component]
 fn Player() -> impl IntoElement {
     let player = element_ref();
-    let seek = player.clone();
     // The video shows the platform's controls.
     let system_controls = signal(false);
     // The video plays (it starts paused).
@@ -237,11 +234,8 @@ fn Player() -> impl IntoElement {
                     ),
             )
             .child(
-                Button::new("Restart", {
-                    let seek = seek.clone();
-                    move |_: &()| seek.seek(0.0)
-                })
-                .variant(ButtonVariant::Secondary),
+                Button::new("Restart", move |_: &()| player.seek(0.0))
+                    .variant(ButtonVariant::Secondary),
             )
     };
     Card::new()
@@ -267,19 +261,17 @@ fn Player() -> impl IntoElement {
                     });
                 }),
         ))
-        .child(If::new(move || !system_controls.get(), controls))
+        .child(when(move || !system_controls.get(), controls))
         .child(
-            segmented(
-                [
+            segmented()
+                .options([
                     Segment::new("Own controls"),
                     Segment::new("System controls"),
-                ],
-                Prop::bind(move || u32::from(system_controls.get())),
-            )
-            .on_event(move |e: &SegmentedEvent| {
-                let SegmentedEvent::Change(i) = *e;
-                system_controls.set(i == 1);
-            }),
+                ])
+                .selected(move || u32::from(system_controls.get()))
+                .on_change(move |&i: &u32| {
+                    system_controls.set(i == 1);
+                }),
         )
 }
 
@@ -291,35 +283,31 @@ fn nav_button(
     enabled: impl Fn() -> bool + 'static,
     on_press: impl Into<Listener<()>>,
 ) -> impl IntoElement {
-    press_with(
-        PressProps {
-            disabled: Prop::bind(move || !enabled()),
-            label: Some(label.into()).into(),
-            hit_slop: Some(4.0),
-            ..PressProps::default()
-        },
-        on_press,
-    )
-    .child(
-        view()
-            .size(px(44.0))
-            .rounded(px(22.0))
-            .bg(colors::RAISED)
-            .finish(Finish::Raised)
-            .border_1()
-            .border_color(colors::BORDER)
-            .items_center()
-            .justify_center()
-            .when(flip, |v| v.rotate(180.0))
-            .child(icon(IconName::Chevron, 18.0, colors::TEXT)),
-    )
+    let on_press: Listener<()> = on_press.into();
+    press()
+        .disabled(move || !enabled())
+        .label(label)
+        .hit_slop(4.0)
+        .on_press(on_press)
+        .child(
+            view()
+                .size(px(44.0))
+                .rounded(px(22.0))
+                .bg(colors::RAISED)
+                .finish(Finish::Raised)
+                .border_1()
+                .border_color(colors::BORDER)
+                .items_center()
+                .justify_center()
+                .when(flip, |v| v.rotate(deg(180.0)))
+                .child(icon().name(IconName::Chevron).size(18.0).tint(colors::TEXT)),
+        )
 }
 
 /// The inline page and the messages between it and the app. The page's
 /// HTML follows the appearance (it reloads when it changes).
 fn messaging() -> impl IntoElement {
     let web = element_ref();
-    let post = web.clone();
     // What the inline page posted last.
     let message = signal(String::new());
     // What the app posted last (`hi #N`), 0 before.
@@ -361,7 +349,7 @@ fn messaging() -> impl IntoElement {
         .child(Button::new("Post to the page", move |_: &()| {
             let n = (nsh_core::time::unix_ms() as u64 % 1000) as u32;
             sent.set(n);
-            post.post_message(format!("hi #{n}"));
+            web.post_message(format!("hi #{n}"));
         }))
 }
 
@@ -369,8 +357,5 @@ fn messaging() -> impl IntoElement {
 /// tell the app.
 #[component]
 pub(crate) fn Media() -> impl IntoElement {
-    DemoPage::new()
-        .card(messaging)
-        .card(|| Site::element(()))
-        .card(|| Player::element(()))
+    DemoPage::new().card(messaging).card(site).card(player)
 }

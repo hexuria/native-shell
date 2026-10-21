@@ -3,18 +3,26 @@
 //! the desktop layout of wide windows (`ui::desktop`), a sidebar of the demos
 //! and the selected one in a pane beside it. [`crate::Gallery`] makes the
 //! one the window's width calls for, again when it changes (TS remounts its
-//! shell), so demos read `desktop()` and their layout once.
+//! shell), so demos read `desktop()` and their layout once. The demo open
+//! is kept in the app's storage and opened again at launch.
 
-use std::ptr;
+use std::{cell::Cell, ptr};
 
-use nsh_core::ui::{AccessibilityRole, AccessibilityState, AnyElement, prelude::*};
+use nsh_base::{nav_page, nav_stack};
+use nsh_core::{
+    storage::Storage,
+    ui::{AccessibilityRole, AccessibilityState, AnyElement, prelude::*},
+};
 
 use crate::{
     assets::LOGO,
     demos::{self, Demo, GROUPS},
     nav::{self, Route},
-    ui::{Badge, IconTile, MONO, SIDEBAR, colors, icon, radius},
+    ui::{Badge, IconTile, MONO, SIDEBAR, colors, desktop, icon, radius},
 };
+
+/// The storage key of the demo open (its name).
+const LAST_DEMO: &str = "lastDemo";
 
 /// The demo the desktop layout shows.
 #[derive(Clone, Copy)]
@@ -41,17 +49,75 @@ struct WasDesktop(bool);
 /// pushed and gone when it is popped.
 fn pushed() -> AnyElement {
     let routes = nav::routes();
-    Each::new(
+    each(
         move || routes.with(|r| r.0.clone()),
         |route: &Route| route.key.clone(),
         |route, depth| {
             let route = route.get_untracked();
             (route.screen)()
                 // The user popped it natively: it and what is above it go.
-                .on_dismiss(move |_: &()| nav::truncate(depth.get_untracked()))
+                .on_dismiss(move || nav::truncate(depth.get_untracked()))
         },
     )
     .into_element()
+}
+
+/// The demo the pushed screens show, if any.
+fn pushed_demo() -> Option<&'static Demo> {
+    nav::routes().with(|routes| {
+        GROUPS
+            .iter()
+            .flat_map(|g| g.demos)
+            .find(|demo| routes.0.iter().any(|r| *r.key == *demo.key()))
+    })
+}
+
+/// Opens the demo open when the app last ran (selected in the desktop
+/// layout, pushed over the index on phones); then keeps the one open in
+/// the app's storage. A name no demo has opens none.
+pub(crate) fn restore() {
+    let last = Storage::get_item(LAST_DEMO).and_then(|name| {
+        GROUPS
+            .iter()
+            .flat_map(|g| g.demos)
+            .find(|demo| demo.name == name)
+    });
+    if let Some(demo) = last {
+        global::<Selected>().set(Selected(demo));
+    }
+    let selected = global::<Selected>();
+    let restored = Cell::new(false);
+    effect(move || {
+        // A window's first frame can come before its size (0 × 0, the
+        // phone layout): which layout opens the demo, and what is open,
+        // are known once it has one.
+        if window().width.0 <= 0.0 {
+            return;
+        }
+        if !restored.replace(true)
+            && let Some(demo) = last
+            && !untracked(desktop)
+            && nav::depth() == 0
+        {
+            nav::reset(vec![demo.route()]);
+        }
+        // The index on phones: none.
+        let open = if desktop() {
+            Some(selected.get().0)
+        } else {
+            pushed_demo()
+        };
+        let kept = Storage::get_item(LAST_DEMO);
+        match open {
+            Some(demo) if kept.as_deref() != Some(demo.name) => {
+                if let Err(full) = Storage::set_item(LAST_DEMO, demo.name) {
+                    log::warn!("{full}");
+                }
+            }
+            None if kept.is_some() => Storage::remove_item(LAST_DEMO),
+            _ => {}
+        }
+    });
 }
 
 /// The phone layout: the index, demos pushed over it.
@@ -61,7 +127,7 @@ pub(crate) fn phone() -> AnyElement {
         let Selected(demo) = global::<Selected>().get_untracked();
         nav::reset(vec![demo.route()]);
     }
-    stack()
+    nav_stack()
         .flex_1()
         .child(demos::index())
         .child(pushed())
@@ -73,13 +139,7 @@ pub(crate) fn phone() -> AnyElement {
 /// content pane, with a back button.
 pub(crate) fn desktop_layout() -> AnyElement {
     // From the phone layout: show the demo it had open.
-    let open = nav::routes().with_untracked(|routes| {
-        GROUPS
-            .iter()
-            .flat_map(|g| g.demos)
-            .find(|demo| routes.0.iter().any(|r| *r.key == *demo.key()))
-    });
-    if let Some(demo) = open {
+    if let Some(demo) = untracked(pushed_demo) {
         global::<Selected>().set(Selected(demo));
     }
     if nav::depth() > 0 {
@@ -92,9 +152,14 @@ pub(crate) fn desktop_layout() -> AnyElement {
         .bg(colors::BACKGROUND)
         .child(sidebar())
         .child(
-            stack()
+            nav_stack()
                 .flex_1()
-                .child(screen().key("pane").header_shown(false).child(demo_pane()))
+                .child(
+                    nav_page()
+                        .key("pane")
+                        .header_shown(false)
+                        .child(demo_pane()),
+                )
                 .child(pushed()),
         )
         .into_element()
@@ -134,7 +199,7 @@ fn sidebar_row(demo: &'static Demo) -> AnyElement {
         .style_when(active, |s| s.bg(fill))
         .hover(|s| s.bg(move || if active() { fill } else { hover }))
         .active(|s| s.bg(fill))
-        .on_press(move |_: &()| select(demo))
+        .on_press(move || select(demo))
         .child(
             view()
                 .absolute()
@@ -146,7 +211,7 @@ fn sidebar_row(demo: &'static Demo) -> AnyElement {
                 .bg(colors::ACCENT)
                 .opacity(move || if active() { 1.0_f32 } else { 0.0 }),
         )
-        .child(icon(demo.icon, 17.0, move || {
+        .child(icon().name(demo.icon).size(17.0).tint(move || {
             if active() {
                 colors::ACCENT
             } else {
@@ -180,7 +245,7 @@ fn sidebar() -> AnyElement {
                     .text_size(px(11.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(colors::FAINT)
-                    .letter_spacing(0.6)
+                    .letter_spacing(px(0.6))
                     .px(px(10.0))
                     .pt_4()
                     .pb(px(6.0)),
@@ -233,7 +298,7 @@ fn sidebar() -> AnyElement {
                 .child(
                     text(move || {
                         let size = window();
-                        format!("{} × {} pt", size.width.round(), size.height.round())
+                        format!("{} × {} pt", size.width.0.round(), size.height.0.round())
                     })
                     .text_size(px(12.0))
                     .text_color(colors::MUTED)

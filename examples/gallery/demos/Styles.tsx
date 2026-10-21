@@ -1,8 +1,6 @@
-import { type JSX, Scroll, signal, Text, View, type ViewStyle } from "nsh";
-import { Animated, createNativeValue, Easing } from "nsh/animated";
+import { Image, type JSX, List, Scroll, signal, Text, View, type ViewStyle } from "nsh";
+import { Animated, createAnimatedValue, Easing } from "nsh/animated";
 import { I18nManager } from "nsh/device";
-import { Image } from "nsh/image";
-import { List } from "nsh/list";
 import { alpha, Badge, Button, Caption, Card, colors, DemoPage, finish, hint, isDark, mono, Press, radius, Segmented, tints, Toggle } from "../ui";
 
 /** The stage every specimen stands on: the card's light, without its drop shadow. */
@@ -236,7 +234,7 @@ function Shadows() {
 function Layers() {
   const clip = signal(true);
   const front = signal(0);
-  const opacity = createNativeValue(0.45);
+  const opacity = createAnimatedValue(0.45);
   const level = signal<"0.2" | "0.45" | "1">("0.45");
   const stack = ["danger", "info", "up"] as const;
   return (
@@ -311,7 +309,7 @@ function Layers() {
 
 /** Two faces back to back: each hides while turned away. */
 function FlipCard() {
-  const angle = createNativeValue(0);
+  const angle = createAnimatedValue(0);
   const flipped = signal(false);
   const flip = () => {
     flipped.set(!flipped());
@@ -396,7 +394,7 @@ function FlipCard() {
 
 function Transforms() {
   // A slow native sway, so the perspective reads as depth.
-  const sway = createNativeValue(-30);
+  const sway = createAnimatedValue(-30);
   Animated.loop(
     Animated.sequence([
       Animated.timing(sway, { toValue: 30, duration: 2200, easing: Easing.inOut(Easing.sin) }),

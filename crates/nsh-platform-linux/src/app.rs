@@ -3,12 +3,16 @@
 
 use std::{
     cell::RefCell,
+    path::PathBuf,
     rc::Rc,
     sync::{Arc, RwLock},
 };
 
 use gtk4::{self as gtk, glib, prelude::*};
-use nsh_core::platform::Appearance;
+use nsh_core::{
+    geometry::px,
+    platform::{Appearance, Locale},
+};
 use nsh_engine::{App, Bundle, ColorScheme, EngineConfig, Environment, Idiom, Limits, Os, Root};
 
 use crate::{
@@ -18,10 +22,30 @@ use crate::{
 
 static UI_SETS: RwLock<Option<Vec<nsh_core::ui::Registry>>> = RwLock::new(None);
 
-/// Sets the UI sets every engine serves (default: `nsh/ui/mobile`); an app
+/// Sets the UI sets every engine serves (default: `nsh/base`); an app
 /// with Rust components of its own calls this before [`run_app`].
 pub fn set_ui_sets(sets: Vec<nsh_core::ui::Registry>) {
     *UI_SETS.write().unwrap_or_else(|e| e.into_inner()) = Some(sets);
+}
+
+/// The app's Rust root ([`set_root`]).
+#[cfg(feature = "dev")]
+static ROOT: RwLock<Option<fn() -> Root>> = RwLock::new(None);
+
+/// Sets the root of an app of Rust only (`nsh.json` `"root"`), which this
+/// development host runs when its dev server publishes the app as the
+/// host's root (`nsh test --target linux` of such an app) instead of a
+/// bundle.
+#[cfg(feature = "dev")]
+pub fn set_root(root: fn() -> Root) {
+    *ROOT.write().unwrap_or_else(|e| e.into_inner()) = Some(root);
+}
+
+/// The app's Rust root, if the host has one ([`set_root`]).
+#[cfg(feature = "dev")]
+pub(crate) fn root() -> Option<Root> {
+    let root = *ROOT.read().unwrap_or_else(|e| e.into_inner());
+    root.map(|root| root())
 }
 
 /// The UI sets engines serve.
@@ -30,11 +54,15 @@ pub(crate) fn ui_sets() -> Vec<nsh_core::ui::Registry> {
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .clone()
-        .unwrap_or_else(|| vec![nsh_ui_mobile::registry()])
+        .unwrap_or_else(|| vec![nsh_base::registry()])
 }
 
 /// What [`run_app`] runs.
 #[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one source per view; keep the public constructor API without allocation"
+)]
 pub enum AppSource {
     /// A Rust app: its root component.
     Rust(Root),
@@ -62,10 +90,6 @@ pub struct AppOptions {
     pub title: String,
     /// The initial window size in points.
     pub size: (i32, i32),
-    /// Steps run once the window shows (`wait 500; shot a.png; tap 10 20;
-    /// quit`): for checking a backend change without touching the screen.
-    /// See [`crate::script`].
-    pub script: Option<String>,
     /// The native components apps can use (`nsh/native`); shared by the
     /// views made with these options. See [`AppView::register_component`].
     pub components: crate::native::Components,
@@ -76,9 +100,17 @@ pub struct AppOptions {
     pub appearance: Appearance,
     /// The VM limits of the apps it runs: [`Limits::default`] (an app
     /// embedded in a host app) unless set; the development host and the
-    /// release runner run apps on their own, with
-    /// [`Limits::standalone_desktop`].
+    /// release runner run apps on their own, with none
+    /// ([`Limits::standalone`]). See [`AppView::set_limits`].
     pub limits: Limits,
+    /// Where the apps it runs keep their data, each in `<dir>/<app id>`
+    /// (`nsh.json` `"id"`, which travels with the bundle): `None` uses the
+    /// system's data directory ([`nsh_engine::data_dir`]); an app that
+    /// embeds nsh gives its own (its data directory + `/nsh`, say).
+    pub data_dir: Option<PathBuf>,
+    /// The apps' storage (`nsh/storage`), overriding the `storage.json` in
+    /// their directory of [`data_dir`](Self::data_dir).
+    pub storage: Option<Arc<dyn nsh_engine::StorageBackend>>,
 }
 
 impl Default for AppOptions {
@@ -89,10 +121,11 @@ impl Default for AppOptions {
             app_id: "com.longbridge.nsh.host".to_owned(),
             title: "nsh".to_owned(),
             size: (390, 844),
-            script: None,
             components: Default::default(),
             appearance: Appearance::System,
             limits: Limits::default(),
+            data_dir: None,
+            storage: None,
         }
     }
 }
@@ -174,6 +207,14 @@ impl AppView {
         self.outer.clone().upcast()
     }
 
+    /// The VM limits ([`AppOptions::limits`]) of the apps loaded from now
+    /// on: the JS heap, the stack, the time budgets of loading and of every
+    /// other call into JS, and the quotas (nodes, ops). The running app
+    /// keeps the limits it was loaded with.
+    pub fn set_limits(&self, limits: Limits) {
+        self.options.borrow_mut().limits = limits;
+    }
+
     /// Runs `app`, replacing what ran.
     pub fn load(&self, app: App) {
         let access = match &app {
@@ -185,15 +226,21 @@ impl AppView {
         let options = self.options.borrow();
         let config = EngineConfig {
             app,
-            viewport: nsh_core::Size::new(0.0, 0.0),
+            viewport: nsh_core::Size::new(px(0.0), px(0.0)),
             trace: options.trace,
-            network: Some(crate::net::network()),
+            network: Some(nsh_engine::net::network()),
+            websocket: None,
+            filesystem: None,
             assets: Some(Arc::new(AssetReader(options.asset_base.clone()))),
             environment: self.surface.environment.get(),
-            header_heights: crate::navigation::HEADER_HEIGHTS,
+            // NSH draws no header: a page's `header` sits at its top.
+            header_heights: nsh_core::NO_NATIVE_HEADER,
             limits: options.limits,
             ui_sets: ui_sets(),
             runtime: None,
+            data_dir: options.data_dir.clone().or_else(nsh_engine::data_dir),
+            storage: options.storage.clone(),
+            clock: Default::default(),
         };
         crate::image::set_asset_base(&self.surface, options.asset_base.clone());
         self.surface
@@ -214,11 +261,37 @@ impl AppView {
         self.surface.native.components().register(name, factory);
     }
 
+    /// The embedding app's locale, which stands in for the user's: what
+    /// `Intl` formats for by default and what `locale()` (`nsh/device`) and
+    /// Rust components' `locale()` read, at once and for every app loaded
+    /// later. `None` follows the system's again.
+    pub fn set_locale(&self, locale: Option<Locale>) {
+        let mut host = self.surface.host_environment.get();
+        host.locale = locale;
+        self.surface.host_environment.set(host);
+        crate::system::host_environment_changed(&self.surface);
+    }
+
+    /// The embedding app's text size relative to the default (1.0), which
+    /// stands in for the user's: every text that allows font scaling (texts,
+    /// inputs, the components' labels, alerts and toasts) is laid out again
+    /// at it, and `fontScale()` reads it, at once and for every app loaded
+    /// later. Lengths stay as they are (spacing, sizes, radii, `rem`):
+    /// boxes sized by their text grow with it. `None` follows the system's
+    /// again.
+    pub fn set_font_scale(&self, scale: Option<f32>) {
+        let mut host = self.surface.host_environment.get();
+        host.font_scale = scale;
+        self.surface.host_environment.set(host);
+        crate::system::host_environment_changed(&self.surface);
+    }
+
     /// Stops the app.
     pub fn stop(&self) {
         self.surface.stop();
     }
 
+    #[cfg(feature = "dev")]
     pub(crate) fn surface(&self) -> &Rc<Surface> {
         &self.surface
     }
@@ -233,7 +306,7 @@ impl AppView {
 
 fn initial_environment() -> Environment {
     Environment {
-        window: (0.0, 0.0),
+        window: nsh_core::Size::new(nsh_core::geometry::px(0.0), nsh_core::geometry::px(0.0)),
         color_scheme: ColorScheme::Light,
         os: Os::Linux,
         idiom: Idiom::Desktop,
@@ -271,9 +344,6 @@ pub fn run_app(source: AppSource, options: AppOptions) -> glib::ExitCode {
             AppSource::DevServer(url) => crate::dev::start(&view, url),
         }
         install_shortcuts(app, &window);
-        if let Some(script) = &options.script {
-            crate::script::run(&window, view.surface().clone(), script);
-        }
         // The window keeps the view (and its engine) alive.
         unsafe_keep(&window, view);
         window.present();

@@ -16,24 +16,30 @@ export type DimensionValue = number | `${number}%` | "auto";
 export type LengthValue = number | `${number}%`;
 
 /** One transform step; angles are degrees (`"45deg"`, `"0.5rad"` or a
- * number). Native values (and nodes derived from them) animate a step
+ * number). Animated values (and nodes derived from them) animate a step
  * natively. */
 export type TransformStep =
-  | { translateX: number | NativeNode }
-  | { translateY: number | NativeNode }
-  | { scale: number | NativeNode }
-  | { scaleX: number | NativeNode }
-  | { scaleY: number | NativeNode }
-  | { rotate: number | string | NativeNode }
-  | { rotateZ: number | string | NativeNode }
-  | { rotateX: number | string | NativeNode }
-  | { rotateY: number | string | NativeNode }
+  | { translateX: number | AnimatedNode }
+  | { translateY: number | AnimatedNode }
+  | { scale: number | AnimatedNode }
+  | { scaleX: number | AnimatedNode }
+  | { scaleY: number | AnimatedNode }
+  | { rotate: number | string | AnimatedNode }
+  | { rotateZ: number | string | AnimatedNode }
+  | { rotateX: number | string | AnimatedNode }
+  | { rotateY: number | string | AnimatedNode }
   | { skewX: number | string }
   | { skewY: number | string }
   | { perspective: number };
 
-type Align = "flex-start" | "flex-end" | "center" | "stretch" | "baseline";
-type Distribute = "flex-start" | "flex-end" | "center" | "stretch" | "space-between" | "space-around" | "space-evenly";
+/** `start` / `end` (and `self-start` / `self-end`, by the item's own
+ * direction) follow the writing direction, as in CSS; `flex-start` /
+ * `flex-end` follow the flex direction; `normal` is CSS's (`stretch` for
+ * items without an aspect ratio). */
+type Align = "flex-start" | "flex-end" | "center" | "stretch" | "baseline" | "start" | "end" | "self-start" | "self-end" | "normal";
+/** `normal` is the default: `flex-start` in flex containers, while grid
+ * tracks sized `auto` stretch to fill the container (CSS). */
+type Distribute = "flex-start" | "flex-end" | "center" | "stretch" | "space-between" | "space-around" | "space-evenly" | "start" | "end" | "normal";
 "#;
 
 /// The interfaces, in the order they extend each other.

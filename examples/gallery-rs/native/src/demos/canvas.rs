@@ -1,5 +1,5 @@
 //! Canvas: 2D drawing on cards: a dial whose needle and sweep follow one
-//! native value, an area chart and a ridgeline that sweep in natively, a
+//! animated value, an area chart and a ridgeline that sweep in natively, a
 //! dot matrix with a pulsing dot, a dumbbell plot whose dots travel, a
 //! clock, SVG paths, compositing and touch drawing (as the TSX gallery's
 //! `demos/CanvasDemo.tsx`).
@@ -10,18 +10,18 @@ use std::{
 };
 
 use nsh_core::{
-    Rect,
+    Bounds, Points,
+    animation::{Curve, EaseMode},
     canvas::{
         CanvasGradient, CanvasOp, CanvasTextAlign, CanvasTextBaseline, Composite, FillRule,
         LineCap, LineJoin, Num, PathOp, svg_path,
     },
-    nsh_animation::{Curve, EaseMode},
     ui::{Animation, prelude::*},
 };
 
 use crate::ui::{
-    Button, ButtonVariant, Card, DemoPage, Figure, Finish, Finished, IconName, Segment,
-    SegmentedEvent, Stat, Tone, caption, colors, hint, legend, segmented,
+    Button, ButtonVariant, Card, DemoPage, Figure, Finish, Finished, IconName, Segment, Stat, Tone,
+    caption, colors, hint, legend, lengths, pt, rect, segmented,
 };
 
 /// A canvas font of the system family (TS `SANS(size, weight)`).
@@ -68,19 +68,19 @@ fn round(x: f64) -> f64 {
 #[derive(Clone, Copy)]
 struct Palette {
     dark: bool,
-    surface: Color,
-    inset: Color,
-    raised: Color,
-    border: Color,
-    line: Color,
-    text: Color,
-    muted: Color,
-    faint: Color,
-    accent: Color,
-    accent_fill: Color,
-    info: Color,
-    warn: Color,
-    danger: Color,
+    surface: Hsla,
+    inset: Hsla,
+    raised: Hsla,
+    border: Hsla,
+    line: Hsla,
+    text: Hsla,
+    muted: Hsla,
+    faint: Hsla,
+    accent: Hsla,
+    accent_fill: Hsla,
+    info: Hsla,
+    warn: Hsla,
+    danger: Hsla,
 }
 
 impl Palette {
@@ -108,12 +108,12 @@ impl Palette {
 
 /// `color` at alpha `a` (TS `alpha(color, a)`; the palette's colors are
 /// opaque).
-fn alpha(color: Color, a: f32) -> Color {
-    color.with_alpha(a)
+fn alpha(color: impl Into<Hsla>, a: f32) -> Hsla {
+    color.into().opacity(a)
 }
 
 /// Diagonal hatching over the current clip (inside save / clip / restore).
-fn hatch(mut p: Painter, (x, y, w, h): (f32, f32, f32, f32), color: Color, gap: f32) -> Painter {
+fn hatch(mut p: Painter, (x, y, w, h): (f32, f32, f32, f32), color: Hsla, gap: f32) -> Painter {
     p = p.stroke_color(color).line_width(1.0).begin_path();
     let mut i = -h;
     while i < w {
@@ -124,9 +124,9 @@ fn hatch(mut p: Painter, (x, y, w, h): (f32, f32, f32, f32), color: Color, gap: 
 }
 
 /// A dashed horizontal or vertical reference line.
-fn dashed(p: Painter, (x0, y0): (f32, f32), (x1, y1): (f32, f32), color: Color) -> Painter {
+fn dashed(p: Painter, (x0, y0): (f32, f32), (x1, y1): (f32, f32), color: Hsla) -> Painter {
     p.save()
-        .line_dash(&[3.0, 4.0])
+        .line_dash(&lengths([3.0, 4.0]))
         .stroke_color(color)
         .line_width(1.0)
         .begin_path()
@@ -136,8 +136,8 @@ fn dashed(p: Painter, (x0, y0): (f32, f32), (x1, y1): (f32, f32), color: Color) 
         .restore()
 }
 
-/// A rectangle whose width is a native value (the reveals' clips).
-fn rect_of(mut p: Painter, x: f32, y: f32, w: &NativeNode, h: f32) -> Painter {
+/// A rectangle whose width is an animated value (the reveals' clips).
+fn rect_of(mut p: Painter, x: f32, y: f32, w: &AnimatedNode, h: f32) -> Painter {
     let w = p.num(w);
     p.op(CanvasOp::Path(PathOp::Rect([
         Num::Const(x),
@@ -160,18 +160,18 @@ fn measured(height: f32, draw: impl Fn(Palette, f32) -> Painter + 'static) -> Ca
         }
     })
     .h(px(height))
-    .on_layout(move |frame: &Rect| width.set(frame.width))
+    .on_layout(move |frame: &Bounds<Points>| width.set(frame.size.width.0))
 }
 
 /// A value that sweeps 0 → 1 once mounted and again on [`replay`]:
 /// canvases clip to it.
-fn reveal(duration: f32) -> NativeValue {
-    let t = native_value(0.0);
+fn reveal(duration: f32) -> AnimatedValue {
+    let t = animated_value(0.0);
     replay(&t, duration);
     t
 }
 
-fn replay(t: &NativeValue, duration: f32) {
+fn replay(t: &AnimatedValue, duration: f32) {
     t.set(0.0);
     t.timing(1.0, duration, Easing::Curve(Curve::Cubic, EaseMode::Out));
 }
@@ -192,7 +192,7 @@ fn legends(items: impl IntoIterator<Item = (AdaptiveColor, &'static str)>) -> Vi
 
 // ---------------------------------------------------------------------------
 // A dial: a tick ring, a hatched red zone, a gradient sweep and a needle, all
-// bound to one native value. Springing it moves the needle on the UI thread.
+// bound to one animated value. Springing it moves the needle on the UI thread.
 
 /// The dial's presets: label and load.
 const PRESETS: [(&str, u32); 3] = [("Idle", 18), ("Cruise", 57), ("Peak", 91)];
@@ -203,7 +203,7 @@ fn load_of(preset: u32) -> u32 {
 }
 
 /// The dial at `load`, its needle and sweep bound to `needle`.
-fn draw_dial(c: Palette, width: f32, height: f32, needle: &NativeValue, load: u32) -> Painter {
+fn draw_dial(c: Palette, width: f32, height: f32, needle: &AnimatedValue, load: u32) -> Painter {
     let (a0, a1) = (0.75 * PI, 2.25 * PI);
     let angle = needle.interpolate(&[0.0, 100.0], &[a0, a1]);
     let (cx, cy) = (width / 2.0, height * 0.54);
@@ -264,11 +264,11 @@ fn draw_dial(c: Palette, width: f32, height: f32, needle: &NativeValue, load: u3
         .arc(cx, cy, sr, a0, a1)
         .stroke()
         .stroke_style(
-            CanvasGradient::conic(a0 - 0.2, cx, cy)
-                .add_color_stop(0.0, c.info)
-                .add_color_stop(0.45, c.accent)
-                .add_color_stop(0.75, c.warn)
-                .add_color_stop(0.8, c.danger),
+            CanvasGradient::conic(Radians(a0 - 0.2), pt(cx, cy))
+                .add_color_stop(percentage(0.0), c.info)
+                .add_color_stop(percentage(0.45), c.accent)
+                .add_color_stop(percentage(0.75), c.warn)
+                .add_color_stop(percentage(0.8), c.danger),
         )
         .begin_path()
         .arc(cx, cy, sr, a0, &angle)
@@ -285,14 +285,14 @@ fn draw_dial(c: Palette, width: f32, height: f32, needle: &NativeValue, load: u3
         .fill_text("% load", cx, cy + r * 0.62 + 18.0);
     // The needle, rotated natively.
     let shade = if c.dark {
-        rgba(0x0000_0099)
+        rgba(0x0000_0099).into()
     } else {
         alpha(rgb(0x14140a), 0.3)
     };
     p.save()
         .translate(cx, cy)
         .rotate(&angle)
-        .shadow(shade, 6.0, (0.0, 0.0))
+        .shadow(shade, px(6.0), pt(0.0, 0.0))
         .fill_color(c.text)
         .begin_path()
         .move_to(-14.0, -3.0)
@@ -314,7 +314,7 @@ fn draw_dial(c: Palette, width: f32, height: f32, needle: &NativeValue, load: u3
 #[component]
 fn Dial() -> impl IntoElement {
     let preset = signal(1_u32);
-    let needle = native_value(0.0);
+    let needle = animated_value(0.0);
     needle.spring(load_of(1) as f32, spring(90.0, 9.0));
     let height = 230.0;
     let load = computed(move || load_of(preset.get()));
@@ -328,22 +328,21 @@ fn Dial() -> impl IntoElement {
             ("Nominal", Tone::Up)
         }
     });
-    let drawn = needle.clone();
     Card::new()
         .icon(IconName::Spark)
         .title("Turbine 3 load")
-        .subtitle("Needle and sweep on one native value")
+        .subtitle("Needle and sweep on one animated value")
         .child(measured(height, move |c, width| {
-            draw_dial(c, width, height, &drawn, load.get())
+            draw_dial(c, width, height, &needle, load.get())
         }))
         .child(
-            segmented(PRESETS.map(|(label, _)| Segment::new(label)), preset).on_event(
-                move |event: &SegmentedEvent| {
-                    let SegmentedEvent::Change(to) = *event;
+            segmented()
+                .options(PRESETS.map(|(label, _)| Segment::new(label)))
+                .selected(preset)
+                .on_change(move |&to: &u32| {
                     preset.set(to);
                     needle.spring(load_of(to) as f32, spring(140.0, 11.0));
-                },
-            ),
+                }),
         )
         .child(
             view()
@@ -407,10 +406,10 @@ fn last(data: &[f64]) -> f64 {
 }
 
 /// The area chart of `data`, its data clipped to `sweep`.
-fn draw_area(c: Palette, width: f32, height: f32, data: &[f64], sweep: &NativeValue) -> Painter {
+fn draw_area(c: Palette, width: f32, height: f32, data: &[f64], sweep: &AnimatedValue) -> Painter {
     let values: Vec<f32> = data.iter().map(|v| *v as f32).collect();
     let font = sans(11.0, 400);
-    let measure = |s: &str| measure_text(&font, s);
+    let measure = |s: &str| measure_text(&font, s).0;
     let (left, right, top, bottom) = (measure("100") + 8.0, 4.0, 16.0, 20.0);
     let w = width - left - right;
     let h = height - top - bottom;
@@ -429,7 +428,7 @@ fn draw_area(c: Palette, width: f32, height: f32, data: &[f64], sweep: &NativeVa
     }
     // The deploy window: hatched.
     let (wx, ww) = (x(9), x(11) - x(9));
-    p = p.save().begin_path().rect(wx, top, ww, h).clip();
+    p = p.save().begin_path().rect(rect(wx, top, ww, h)).clip();
     p = hatch(p, (wx, top, ww, h), alpha(c.warn, 0.28), 6.0)
         .restore()
         .fill_color(c.warn)
@@ -462,9 +461,9 @@ fn draw_area(c: Palette, width: f32, height: f32, data: &[f64], sweep: &NativeVa
         .line_to(x(0), top + h)
         .close_path()
         .fill_style(
-            CanvasGradient::linear(0.0, top, 0.0, top + h)
-                .add_color_stop(0.0, alpha(c.accent, 0.26))
-                .add_color_stop(1.0, alpha(c.accent, 0.0)),
+            CanvasGradient::linear(pt(0.0, top), pt(0.0, top + h))
+                .add_color_stop(percentage(0.0), alpha(c.accent, 0.26))
+                .add_color_stop(percentage(1.0), alpha(c.accent, 0.0)),
         )
         .fill()
         .begin_path();
@@ -504,7 +503,7 @@ fn draw_area(c: Palette, width: f32, height: f32, data: &[f64], sweep: &NativeVa
     let lw = measure(&label) + 12.0;
     p.fill_color(c.raised)
         .begin_path()
-        .round_rect(width - right - lw, y(mean) - 9.0, lw, 18.0, 9.0)
+        .round_rect(rect(width - right - lw, y(mean) - 9.0, lw, 18.0), px(9.0))
         .fill()
         .fill_color(c.text)
         .text_baseline(CanvasTextBaseline::Middle)
@@ -522,7 +521,6 @@ fn AreaChart() -> impl IntoElement {
         let (last, avg) = figures.get();
         last >= avg
     });
-    let drawn = sweep.clone();
     Card::new()
         .icon(IconName::Stocks)
         .title("Relay throughput")
@@ -548,7 +546,7 @@ fn AreaChart() -> impl IntoElement {
             .tone(move || if up.get() { Tone::Up } else { Tone::Down }),
         )
         .child(measured(height, move |c, width| {
-            data.with(|data| draw_area(c, width, height, data, &drawn))
+            data.with(|data| draw_area(c, width, height, data, &sweep))
         }))
         .child(legends([
             (colors::ACCENT, "Messages"),
@@ -582,9 +580,9 @@ fn ridges() -> Vec<Vec<f32>> {
 }
 
 /// The ridgeline, its curves clipped to `sweep`.
-fn draw_ridges(c: Palette, width: f32, height: f32, sweep: &NativeValue) -> Painter {
+fn draw_ridges(c: Palette, width: f32, height: f32, sweep: &AnimatedValue) -> Painter {
     let font = sans(11.0, 400);
-    let measure = |s: &str| measure_text(&font, s);
+    let measure = |s: &str| measure_text(&font, s).0;
     let left = measure("Mon") + 10.0;
     let bottom = 18.0;
     let step = (height - bottom - 30.0) / (DAYS.len() - 1) as f32;
@@ -617,8 +615,8 @@ fn draw_ridges(c: Palette, width: f32, height: f32, sweep: &NativeValue) -> Pain
         for h in 1..series.len() {
             let (x0, x1) = (x(h as f32 - 1.0), x(h as f32));
             p = p.quadratic_curve_to(
-                (x0, y(series[h - 1])),
-                ((x0 + x1) / 2.0, (y(series[h - 1]) + y(series[h])) / 2.0),
+                pt(x0, y(series[h - 1])),
+                pt((x0 + x1) / 2.0, (y(series[h - 1]) + y(series[h])) / 2.0),
             );
         }
         let weekend = d >= 5;
@@ -651,7 +649,6 @@ fn draw_ridges(c: Palette, width: f32, height: f32, sweep: &NativeValue) -> Pain
 fn Ridgeline() -> impl IntoElement {
     let sweep = reveal(1400.0);
     let height = 210.0;
-    let drawn = sweep.clone();
     Card::new()
         .icon(IconName::Animation)
         .title("Footfall by hour")
@@ -661,7 +658,7 @@ fn Ridgeline() -> impl IntoElement {
         }))
         .child(caption("Gate B, last week", Some("Peak 12:00–14:00")))
         .child(measured(height, move |c, width| {
-            draw_ridges(c, width, height, &drawn)
+            draw_ridges(c, width, height, &sweep)
         }))
         .child(legends([
             (colors::ACCENT, "Weekday"),
@@ -685,7 +682,7 @@ fn levels() -> [AdaptiveColor; 5] {
 }
 
 /// The dot matrix, its newest dot pulsing with `pulse`.
-fn draw_dots(c: Palette, width: f32, height: f32, pulse: &NativeValue) -> Painter {
+fn draw_dots(c: Palette, width: f32, height: f32, pulse: &AnimatedValue) -> Painter {
     let levels = levels().map(color);
     let (rows, gap) = (7, 12.5);
     let cols = (width / gap).floor() as i32;
@@ -729,7 +726,7 @@ fn draw_dots(c: Palette, width: f32, height: f32, pulse: &NativeValue) -> Painte
 /// The dot matrix's card.
 #[component]
 fn DotMatrix() -> impl IntoElement {
-    let pulse = native_value(0.0);
+    let pulse = animated_value(0.0);
     let looped = Animation::timing(
         &pulse,
         1.0,
@@ -781,14 +778,14 @@ const ROUTES: [(&str, f32, f32); 6] = [
 ];
 
 /// The dumbbell plot, its after dots travelling with `t`.
-fn draw_dumbbell(c: Palette, width: f32, height: f32, t: &NativeValue) -> Painter {
+fn draw_dumbbell(c: Palette, width: f32, height: f32, t: &AnimatedValue) -> Painter {
     let (name_font, small) = (sans(13.0, 400), sans(11.0, 400));
     let left = ROUTES
         .iter()
-        .map(|r| measure_text(&name_font, r.0))
+        .map(|r| measure_text(&name_font, r.0).0)
         .fold(0.0, f32::max)
         + 12.0;
-    let right = measure_text(&small, "+00%") + 10.0;
+    let right = measure_text(&small, "+00%").0 + 10.0;
     let max = 250.0;
     let x = |ms: f32| left + ms / max * (width - left - right);
     let mut p = Painter::new()
@@ -799,7 +796,7 @@ fn draw_dumbbell(c: Palette, width: f32, height: f32, t: &NativeValue) -> Painte
         let label = format!("{ms}");
         p = p.fill_color(c.faint).fill_text(
             &label,
-            x(ms) - measure_text(&small, &label) / 2.0,
+            x(ms) - measure_text(&small, &label).0 / 2.0,
             height - 3.0,
         );
     }
@@ -840,13 +837,13 @@ fn draw_dumbbell(c: Palette, width: f32, height: f32, t: &NativeValue) -> Painte
             .fill()
             .font(&small)
             .fill_color(tone)
-            .fill_text(&label, width - measure_text(&small, &label), cy);
+            .fill_text(&label, width - measure_text(&small, &label).0, cy);
     }
     p
 }
 
 /// Moves the after dots from the before ones again.
-fn play(t: &NativeValue) {
+fn play(t: &AnimatedValue) {
     t.set(0.0);
     t.timing(1.0, 1500.0, Easing::Curve(Curve::Cubic, EaseMode::Out));
 }
@@ -854,17 +851,16 @@ fn play(t: &NativeValue) {
 /// The dumbbell plot's card: "Replay" moves its dots again.
 #[component]
 fn Dumbbell() -> impl IntoElement {
-    let t = native_value(0.0);
+    let t = animated_value(0.0);
     play(&t);
     let height = 30.0 * ROUTES.len() as f32 + 24.0;
-    let drawn = t.clone();
     Card::new()
         .icon(IconName::Physics)
         .title("Route latency")
         .subtitle("Dumbbell, before → after")
         .right(header_button("Replay", move |_: &()| play(&t)))
         .child(measured(height, move |c, width| {
-            draw_dumbbell(c, width, height, &drawn)
+            draw_dumbbell(c, width, height, &t)
         }))
         .child(legends([
             (colors::MUTED, "Before"),
@@ -877,7 +873,7 @@ fn Dumbbell() -> impl IntoElement {
 // A clock: transforms, save / restore, a second hand rotating natively.
 
 /// The clock's face, its second hand turned by `seconds`.
-fn draw_clock(c: Palette, size: f32, seconds: &NativeValue) -> Painter {
+fn draw_clock(c: Palette, size: f32, seconds: &AnimatedValue) -> Painter {
     let r = size / 2.0;
     let mut p = Painter::new()
         .translate(r, r)
@@ -934,7 +930,7 @@ fn draw_clock(c: Palette, size: f32, seconds: &NativeValue) -> Painter {
 /// The clock's card.
 #[component]
 fn Clock() -> impl IntoElement {
-    let seconds = native_value(0.0);
+    let seconds = animated_value(0.0);
     let spin =
         Animation::timing(&seconds, 60.0, Timing::new(60_000.0, Easing::Linear)).looped(None);
     spin.start();
@@ -1041,7 +1037,7 @@ fn draw_compositing(c: Palette, width: f32, height: f32) -> Painter {
         .clip()
         .fill_color(c.raised)
         .fill_rect(0.0, 0.0, 92.0, height)
-        .draw_image(crate::assets::LOGO.uri, 10.0, cy - 36.0, 72.0, 72.0)
+        .draw_image(crate::assets::LOGO.uri, rect(10.0, cy - 36.0, 72.0, 72.0))
         .restore()
         .stroke_color(c.border)
         .line_width(1.5)
@@ -1051,20 +1047,20 @@ fn draw_compositing(c: Palette, width: f32, height: f32) -> Painter {
     // A shadowed card with a hole punched through (destination-out).
     let cx = width / 2.0;
     let shade = if c.dark {
-        rgba(0x0000_00b3)
+        rgba(0x0000_00b3).into()
     } else {
         alpha(rgb(0x14140a), 0.25)
     };
     let p = p
         .save()
-        .shadow(shade, 14.0, (0.0, 6.0))
+        .shadow(shade, px(14.0), pt(0.0, 6.0))
         .fill_style(
-            CanvasGradient::linear(cx - 46.0, 0.0, cx + 46.0, height)
-                .add_color_stop(0.0, c.accent_fill)
-                .add_color_stop(1.0, rgb(0x7fbf3a)),
+            CanvasGradient::linear(pt(cx - 46.0, 0.0), pt(cx + 46.0, height))
+                .add_color_stop(percentage(0.0), c.accent_fill)
+                .add_color_stop(percentage(1.0), rgb(0x7fbf3a)),
         )
         .begin_path()
-        .round_rect(cx - 46.0, cy - 40.0, 92.0, 80.0, 16.0)
+        .round_rect(rect(cx - 46.0, cy - 40.0, 92.0, 80.0), px(16.0))
         .fill()
         .restore()
         .composite(Composite::DestinationOut)
@@ -1075,15 +1071,15 @@ fn draw_compositing(c: Palette, width: f32, height: f32) -> Painter {
     // A radial gradient with a dashed outline.
     let rx = width - 46.0;
     p.fill_style(
-        CanvasGradient::radial(rx - 10.0, cy - 12.0, 4.0, rx, cy, 40.0)
-            .add_color_stop(0.0, rgb(0xffe2a8))
-            .add_color_stop(0.55, c.warn)
-            .add_color_stop(1.0, alpha(c.danger, 0.2)),
+        CanvasGradient::radial(pt(rx - 10.0, cy - 12.0), px(4.0), pt(rx, cy), px(40.0))
+            .add_color_stop(percentage(0.0), rgb(0xffe2a8))
+            .add_color_stop(percentage(0.55), c.warn)
+            .add_color_stop(percentage(1.0), alpha(c.danger, 0.2)),
     )
     .begin_path()
     .arc(rx, cy, 38.0, 0.0, TAU)
     .fill()
-    .line_dash(&[5.0, 5.0])
+    .line_dash(&lengths([5.0, 5.0]))
     .stroke_color(c.warn)
     .line_width(1.5)
     .begin_path()
@@ -1167,17 +1163,17 @@ fn Sketch() -> impl IntoElement {
         strokes.with(|strokes| draw_sketch(Palette::now(), width.get(), height, strokes))
     })
     .h(px(height))
-    .on_layout(move |frame: &Rect| width.set(frame.width))
+    .on_layout(move |frame: &Bounds<Points>| width.set(frame.size.width.0))
     .claim_touches(TouchClaim::on_start())
     .keep_touches(true)
     .on_responder_grant(move |e: &ResponderEvent| {
-        strokes.update(|s| s.push(vec![(e.location_x, e.location_y)]));
+        strokes.update(|s| s.push(vec![(e.location.x.0, e.location.y.0)]));
     })
     .on_responder_move(move |e: &ResponderEvent| {
         if strokes.with_untracked(|s| !s.is_empty()) {
             strokes.update(|s| {
                 if let Some(stroke) = s.last_mut() {
-                    stroke.push((e.location_x, e.location_y));
+                    stroke.push((e.location.x.0, e.location.y.0));
                 }
             });
         }
@@ -1207,13 +1203,13 @@ fn Sketch() -> impl IntoElement {
 pub(crate) fn CanvasDemo() -> impl IntoElement {
     DemoPage::new()
         .columns(3)
-        .card(|| Dial::element(()))
-        .card(|| AreaChart::element(()))
-        .card(|| Ridgeline::element(()))
-        .card(|| DotMatrix::element(()))
-        .card(|| Dumbbell::element(()))
-        .card(|| Clock::element(()))
-        .card(|| Glyphs::element(()))
-        .card(|| Compositing::element(()))
-        .card(|| Sketch::element(()))
+        .card(dial)
+        .card(area_chart)
+        .card(ridgeline)
+        .card(dot_matrix)
+        .card(dumbbell)
+        .card(clock)
+        .card(glyphs)
+        .card(compositing)
+        .card(sketch)
 }

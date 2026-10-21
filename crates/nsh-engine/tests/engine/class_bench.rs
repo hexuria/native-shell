@@ -57,6 +57,7 @@ impl Meter {
 }
 
 /// Functions of the three kinds.
+#[module]
 pub(crate) struct Calc;
 
 #[module]
@@ -100,7 +101,7 @@ impl App {
             ..Default::default()
         })
         .unwrap();
-        let mut core = Core::new(ApproxTextEngine, Size::new(390.0, 844.0));
+        let mut core = Core::new(ApproxTextEngine, Size::new(px(390.0), px(844.0)));
         core.set_components(registry());
         core.set_posts(posts);
         let app = Self {

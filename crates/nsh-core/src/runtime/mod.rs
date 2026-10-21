@@ -1,6 +1,8 @@
 //! The runtime's modules written in Rust: `nsh/android`'s `Toast`,
-//! `nsh/accessibility`'s commands, all of `nsh/image` and `nsh/clipboard`,
-//! `nsh/desktop`'s `Window`. Their JS face is made
+//! `nsh/accessibility`'s commands, all of `nsh/image`, `nsh/clipboard` and
+//! `nsh/storage`,
+//! `nsh/desktop`'s `Window`, the surface-independent `os` metadata,
+//! `net`'s sockets, `websocket`'s connections and `fs/promises`' files. Their JS face is made
 //! from their specs like a UI set's (`nsh-js` `components.rs`), and so are
 //! their declarations ([`crate::ui::declarations`]); `nsh-js` adds what has
 //! to run in JS (the app's listeners, reactive accessors).
@@ -13,7 +15,20 @@ mod accessibility;
 mod android;
 mod clipboard;
 mod desktop;
+mod fs;
 mod image;
+mod net;
+mod os;
+mod process;
+mod storage;
+mod websocket;
+
+/// The [`crate::ui::Quotas`] kind WebSockets count under: the `websocket`
+/// module's connections and the global `WebSocket`'s (`nsh-js`) share
+/// [`MAX_WEBSOCKETS`] per VM.
+pub const WEBSOCKETS: &str = "websocket.connections";
+/// WebSockets open or connecting at once in one VM, of both APIs.
+pub const MAX_WEBSOCKETS: usize = 32;
 
 /// The runtime's Rust modules, one registry per JS module (its
 /// [`Registry::namespace`]: `nsh/android`).
@@ -23,16 +38,60 @@ pub fn registries() -> &'static [Registry] {
         let mut android = Registry::runtime("nsh/android");
         android
             .module::<android::Toast>()
-            .module::<android::BackHandler>()
-            .module::<android::Android>();
+            .module::<android::BackHandler>();
         let mut accessibility = Registry::runtime("nsh/accessibility");
         accessibility.module::<accessibility::AccessibilityInfo>();
         let mut image = Registry::runtime("nsh/image");
         image.module::<image::Image>();
         let mut clipboard = Registry::runtime("nsh/clipboard");
         clipboard.module::<clipboard::Clipboard>();
+        let mut storage = Registry::runtime("nsh/storage");
+        storage.module::<storage::Storage>();
         let mut desktop = Registry::runtime("nsh/desktop");
         desktop.module::<desktop::Window>();
-        vec![android, accessibility, image, clipboard, desktop]
+        let mut os = Registry::runtime("os");
+        os.module::<os::Os>();
+        let mut process = Registry::runtime("process");
+        process
+            .module::<process::Process>()
+            .native_values(&["nextTick"]);
+        let mut net = Registry::runtime("net");
+        net.module::<net::Net>();
+        let mut fs = Registry::runtime("fs/promises");
+        fs.module::<fs::Fs>();
+        let websocket = {
+            let mut websocket = Registry::runtime("websocket");
+            websocket.module::<websocket::WebSocket>();
+            websocket
+        };
+        vec![
+            android,
+            accessibility,
+            image,
+            clipboard,
+            storage,
+            desktop,
+            os,
+            net,
+            process,
+            fs,
+            websocket,
+        ]
     })
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every export TS sees has a doc comment (the declarations show it).
+    #[test]
+    fn every_export_is_documented() {
+        for registry in super::registries() {
+            assert_eq!(
+                registry.undocumented(),
+                Vec::<String>::new(),
+                "{:?}",
+                registry.namespace()
+            );
+        }
+    }
 }

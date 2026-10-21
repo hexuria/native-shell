@@ -12,7 +12,7 @@
 
 use std::{collections::BTreeMap, fmt::Write as _};
 
-use nsh_core::ui::Registry;
+use nsh_core::ui::{Registry, description::SetDescription};
 
 use crate::modules::{Item, MODULES, NativeModule, Ts};
 
@@ -31,7 +31,7 @@ export type RecursiveArray<T> = readonly (T | RecursiveArray<T>)[];
 export type StyleProp<T> = T | RecursiveArray<T | false | null | undefined> | false | null | undefined;
 
 /** Props every host element accepts. */
-export interface CommonProps extends TouchProps, HostProps {
+export interface CommonProps extends TouchProps, HostProps, StateStyleProps {
   ref?: YNode | ((node: YNode) => void);
   children?: JSX.Element;
   /** iOS-only props (ignored elsewhere). */
@@ -43,6 +43,25 @@ export interface CommonProps extends TouchProps, HostProps {
   desktop?: DesktopProps;
   /** Web-only props (ignored elsewhere). */
   web?: WebProps;
+}
+
+/** Styles while the element is in a state, over its own `style` and
+ * classes, applied natively (no JS runs): as the `<state>:` classes.
+ * Later states win (checked, then hover, focus, active); `disabledStyle`
+ * wins over all, and the others do not apply while disabled. */
+export interface StateStyleProps {
+  /** While pressed (`active:`). */
+  activeStyle?: StyleProp<ViewStyle>;
+  /** While a pointer is over it (`hover:`). */
+  hoverStyle?: StyleProp<ViewStyle>;
+  /** While it has focus (`focus:`). */
+  focusStyle?: StyleProp<ViewStyle>;
+  /** While `disabled` (`disabled:`). */
+  disabledStyle?: StyleProp<ViewStyle>;
+  /** While `accessibilityState.checked` is `true` (`checked:`; `"mixed"`
+   * is not checked): a checkbox, a switch or a radio styled by its
+   * value. */
+  checkedStyle?: StyleProp<ViewStyle>;
 }
 
 /** iOS-only props of every element (`ios={{…}}`); elements add their own. */
@@ -72,6 +91,11 @@ export interface ImageAsset {
   uri: string;
   width: number;
   height: number;
+  /** The pixel densities it ships in, 1 being the imported file:
+   * `[1, 2, 3]` when `logo@2x.png` and `logo@3x.png` sit next to
+   * `logo.png`. The image loads the one for the screen's pixel ratio.
+   * Absent when the imported file is the only one. */
+  scales?: number[];
 }
 
 /** `<Image>` */
@@ -82,14 +106,14 @@ export interface ImageProps extends CommonProps, ImageHostProps {
 /** `<Scroll>` */
 export interface ScrollProps extends CommonProps, ScrollingHostProps, ScrollHostProps {
   style?: StyleProp<ViewStyle>;
-  /** The style of a view around the content (React Native's content
-   * container): it scrolls with the content, `flexGrow: 1` makes it at
-   * least as tall as the viewport (a centered empty state). Without it or
-   * `contentContainerClass`, the children are the scroll view's own. */
-  contentContainerStyle?: StyleProp<ViewStyle>;
-  /** The classes of the content container (`contentContainerStyle`), e.g.
+  /** The style of a view around the content: it scrolls with the
+   * content, `flexGrow: 1` makes it at least as tall as the viewport (a
+   * centered empty state). Without it or `contentClass`, the children are
+   * the scroll view's own. */
+  contentStyle?: StyleProp<ViewStyle>;
+  /** The classes of the content (`contentStyle`), e.g.
    * `"grow justify-center p-4"`. */
-  contentContainerClass?: string;
+  contentClass?: string;
 }
 
 /** `<Input>` */
@@ -102,9 +126,9 @@ export interface InputProps extends CommonProps, InputHostProps {
 export interface IOSInputProps extends IOSProps, IOSInputHostProps {}
 
 /** What JS sets on a Rust component's host itself: the app's classes
- * (appended to the component's own), its inline style, its test id, layout
+ * (appended to the component's own), its inline and state styles, its test id, layout
  * events and the ref (`ref.command(name, args)`). */
-export type ComponentHostProps = Pick<ViewProps, "class" | "classList" | "style" | "testID" | "onLayout" | "ref">;
+export type ComponentHostProps = Pick<ViewProps, "class" | "classList" | "style" | "activeStyle" | "hoverStyle" | "focusStyle" | "disabledStyle" | "testID" | "onLayout" | "ref">;
 
 export interface Insets {
   top: number;
@@ -152,19 +176,31 @@ fn doc_comment(out: &mut String, doc: &str, indent: &str) {
 
 /// The declaration of export `name`.
 fn export(out: &mut String, name: &str, ts: Ts) {
+    export_moved(out, name, ts, None);
+}
+
+/// The declaration of export `name`, `@deprecated` when it is imported
+/// from module `moved_to` now.
+fn export_moved(out: &mut String, name: &str, ts: Ts, moved_to: Option<&str>) {
+    let doc = |doc: &str| match moved_to {
+        Some(to) => format!("{doc}\n\n@deprecated Import from \"{to}\"."),
+        None => doc.to_owned(),
+    };
     match ts {
-        Ts::Function(doc, signatures) => {
-            doc_comment(out, doc, "");
+        Ts::Function(text, signatures) => {
+            doc_comment(out, &doc(text), "");
             for signature in signatures {
                 let _ = writeln!(out, "export declare function {name}{signature};");
             }
         }
-        Ts::Const(doc, ty) => {
-            doc_comment(out, doc, "");
+        Ts::Const(text, ty) => {
+            doc_comment(out, &doc(text), "");
             let _ = writeln!(out, "export declare const {name}: {ty};");
         }
-        Ts::Class(doc, body) => {
-            doc_comment(out, doc, "");
+        // One declaration for both modules (a class declared twice is two
+        // types), which `nsh` re-exports: never deprecated.
+        Ts::Class(text, body) => {
+            doc_comment(out, text, "");
             let _ = writeln!(out, "export declare class {name}{body}");
         }
         Ts::Internal => return,
@@ -172,9 +208,35 @@ fn export(out: &mut String, name: &str, ts: Ts) {
     out.push('\n');
 }
 
-fn exports(out: &mut String, items: &[Item]) {
+fn exports(out: &mut String, items: &[Item], moved_to: Option<&str>) {
     for &(name, _, ts) in items {
-        export(out, name, ts);
+        export_moved(out, name, ts, moved_to);
+    }
+}
+
+/// What module `m` serves of module `other` (`nsh` of `nsh/list`): its
+/// values declared again, its classes and types re-exported from its file
+/// (`other_body`, the names it declares).
+fn also_part(out: &mut String, m: &NativeModule, other: &NativeModule, other_body: &str) {
+    let from = relative(&path_of(m.name), &path_of(other.name));
+    for &(name, _, ts) in other.exports {
+        match ts {
+            Ts::Class(..) => {
+                let _ = writeln!(out, "export {{ {name} }} from \"{from}\";");
+            }
+            ts => export(out, name, ts),
+        }
+    }
+    let values: Vec<&str> = other.exports.iter().map(|e| e.0).collect();
+    let mut any = false;
+    for name in exported_names(other_body) {
+        if !values.contains(&name.as_str()) {
+            let _ = writeln!(out, "export type {{ {name} }} from \"{from}\";");
+            any = true;
+        }
+    }
+    if any || other.exports.iter().any(|e| matches!(e.2, Ts::Class(..))) {
+        out.push('\n');
     }
 }
 
@@ -202,7 +264,7 @@ fn element_types() -> String {
     out
 }
 
-/// The file of module `specifier` (`nsh/ui/mobile` -> `nsh/ui/mobile.d.ts`).
+/// The file of module `specifier` (`nsh/base` -> `nsh/base.d.ts`).
 fn path_of(specifier: &str) -> String {
     match specifier {
         "nsh" => "nsh/index.d.ts".to_owned(),
@@ -225,7 +287,27 @@ fn registry_part(out: &mut String, registry: &Registry, own: &[Item]) {
     let omit: Vec<&str> = own.iter().map(|(n, ..)| *n).collect();
     out.push_str(&nsh_core::ui::declarations(registry, &omit));
     let (values, types) = registry.reexports();
-    let natives = registry.native_value_names();
+    reexports_part(out, values, types, registry.native_value_names());
+}
+
+/// The declarations of a described UI set's exports.
+fn set_part(out: &mut String, set: &SetDescription) {
+    out.push_str(&set.declarations);
+    fn strs(names: &[String]) -> Vec<&str> {
+        names.iter().map(String::as_str).collect()
+    }
+    reexports_part(
+        out,
+        &strs(&set.reexported_values),
+        &strs(&set.reexported_types),
+        &strs(&set.native_values),
+    );
+}
+
+/// The declarations of what a set exports as the runtime makes it: the
+/// runtime's `values` and `types`, and the values nsh-js makes for it
+/// (`natives`: navigation's).
+fn reexports_part(out: &mut String, values: &[&str], types: &[&str], natives: &[&str]) {
     let made = crate::env::REEXPORTS
         .iter()
         .chain(crate::navigation::EXPORTS);
@@ -246,14 +328,11 @@ fn registry_part(out: &mut String, registry: &Registry, own: &[Item]) {
 }
 
 /// The modules' files, before imports: (path, body).
-fn bodies(ui_sets: &[Registry]) -> Vec<(String, String)> {
+fn bodies(ui_sets: &[SetDescription]) -> Vec<(String, String)> {
     let mut files = vec![("nsh/types.d.ts".to_owned(), element_types())];
-    let registries: Vec<&Registry> = nsh_core::runtime::registries()
-        .iter()
-        .chain(ui_sets)
-        .collect();
+    let registries = nsh_core::runtime::registries();
     let declared = |m: &&NativeModule| m.exports.iter().any(|e| !matches!(e.2, Ts::Internal));
-    for m in MODULES.iter().filter(declared) {
+    let body_of = |m: &NativeModule| {
         let mut body = String::from(m.types);
         if !body.is_empty() {
             body.push('\n');
@@ -262,11 +341,27 @@ fn bodies(ui_sets: &[Registry]) -> Vec<(String, String)> {
         for registry in registries.iter().filter(|r| r.specifier() == Some(m.name)) {
             registry_part(&mut body, registry, m.exports);
         }
-        exports(&mut body, m.exports);
+        // A UI set is a module of its own (the command line refuses one
+        // named as nsh's): nothing of nsh's to leave out.
+        for set in ui_sets.iter().filter(|s| s.specifier == m.name) {
+            set_part(&mut body, set);
+        }
+        exports(&mut body, m.exports, m.moved_to);
+        body
+    };
+    for m in MODULES.iter().filter(declared) {
+        let mut body = body_of(m);
+        for other in m
+            .also
+            .iter()
+            .filter_map(|a| MODULES.iter().find(|o| o.name == *a))
+        {
+            also_part(&mut body, m, other, &body_of(other));
+        }
         files.push((path_of(m.name), body));
     }
-    // The registries that are modules of their own (`nsh/ui/mobile`, `nsh/image`).
-    for registry in &registries {
+    // The registries that are modules of their own (`nsh/base`, `nsh/image`).
+    for registry in registries {
         let Some(specifier) = registry.specifier() else {
             continue;
         };
@@ -276,6 +371,15 @@ fn bodies(ui_sets: &[Registry]) -> Vec<(String, String)> {
         let mut body = String::new();
         registry_part(&mut body, registry, &[]);
         files.push((path_of(specifier), body));
+    }
+    // The UI sets (`nsh/base`, an app's own).
+    for set in ui_sets {
+        if MODULES.iter().any(|m| m.name == set.specifier) {
+            continue;
+        }
+        let mut body = String::new();
+        set_part(&mut body, set);
+        files.push((path_of(&set.specifier), body));
     }
     files
 }
@@ -384,7 +488,28 @@ pub(crate) fn exported_names(body: &str) -> Vec<String> {
 pub(crate) fn exported_values(body: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in code_only(body).lines() {
-        let Some(rest) = line.strip_prefix("export declare ") else {
+        let Some(rest) = line.strip_prefix("export ") else {
+            continue;
+        };
+        // The local binding is not the exported name: `export default x`
+        // creates the namespace value `default`, not a named export `x`.
+        if rest.split_whitespace().next() == Some("default") {
+            if !out.iter().any(|name| name == "default") {
+                out.push("default".to_owned());
+            }
+            continue;
+        }
+        // A value re-exported: `export { Path2D } from "./canvas";`.
+        if let Some(names) = rest.strip_prefix('{').and_then(|r| r.split_once('}')) {
+            for name in names.0.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+                let name = name.rsplit(" as ").next().unwrap_or(name).to_owned();
+                if !out.contains(&name) {
+                    out.push(name);
+                }
+            }
+            continue;
+        }
+        let Some(rest) = rest.strip_prefix("declare ") else {
             continue;
         };
         let rest = rest.trim_start_matches("abstract ");
@@ -414,10 +539,14 @@ fn references(body: &str) -> (Vec<String>, Vec<String>) {
             .rsplit(|c: char| !is_ident(c))
             .next()
             .unwrap_or_default();
+        let after = &code[before.len() + word.len()..];
         if DECLARING.contains(&prev_word) && prev.ends_with(prev_word) {
             local.push(word.to_owned());
         } else if prev.ends_with('.') {
             // A member (`JSX.Element`, `Symbol.iterator`).
+        } else if after.trim_start_matches('?').starts_with([':', '(']) {
+            // A field's, method's or parameter's name (`signal?: string`,
+            // `connect(url: string)`), not a type.
         } else {
             used.push(word.to_owned());
         }
@@ -457,11 +586,12 @@ fn relative(from: &str, to: &str) -> String {
 }
 
 /// The files of `.nsh/types` for apps whose hosts serve `ui_sets`
-/// (`nsh/ui/mobile`, ...), as (path relative to it, contents): one per
+/// (`nsh/base`, an app's own, as data: their declarations come with
+/// them), as (path relative to it, contents): one per
 /// module apps import, `nsh/types.d.ts` (the element types `nsh` exports),
 /// `nsh/jsx-runtime.d.ts` (where TypeScript finds the JSX namespace:
 /// `jsxImportSource: "nsh"`) and `nsh/globals.d.ts`.
-pub fn type_definitions(ui_sets: &[Registry]) -> Vec<(String, String)> {
+pub fn type_definitions(ui_sets: &[SetDescription]) -> Vec<(String, String)> {
     let files = bodies(ui_sets);
     // Who declares each name.
     let mut owner: BTreeMap<String, &str> = BTreeMap::new();
@@ -511,7 +641,30 @@ pub fn type_definitions(ui_sets: &[Registry]) -> Vec<(String, String)> {
         format!("{BANNER}export type {{ JSX }} from \"./types\";\n"),
     ));
     out.push(("nsh/globals.d.ts".to_owned(), globals()));
+    out.extend(standard_types().iter().cloned());
     out
+}
+
+/// Standard export discovery evaluates trusted builtins once, without running
+/// application code, privileged operations, or asynchronous jobs.
+fn standard_types() -> &'static Vec<(String, String)> {
+    static FILES: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+    FILES.get_or_init(|| {
+        let host = crate::Host::new().expect("create standard declaration discovery VM");
+        let exports = host
+            .standard_exports()
+            .expect("discover actual standard module exports");
+        let names: Vec<Vec<&str>> = exports
+            .iter()
+            .map(|(_, values)| values.iter().map(String::as_str).collect())
+            .collect();
+        let borrowed: Vec<(&str, &[&str])> = exports
+            .iter()
+            .zip(&names)
+            .map(|((name, _), values)| (name.as_str(), values.as_slice()))
+            .collect();
+        crate::standard::declarations::type_definitions(&borrowed)
+    })
 }
 
 /// A constant's value as TypeScript (`2`, not `2.0`).
@@ -528,7 +681,9 @@ fn number(v: f64) -> String {
 fn globals() -> String {
     let mut out = String::from(BANNER);
     out.push_str("// The globals of nsh's JS environment besides the ECMAScript library\n// (there is no DOM).\n\n");
+    out.push_str("/// <reference path=\"../standard/index.d.ts\" />\n");
     out.push_str(crate::host::GLOBALS);
+    out.push_str(&crate::standard::declarations::globals());
     for types in crate::web::TYPES {
         out.push('\n');
         out.push_str(types);
@@ -589,20 +744,70 @@ mod tests {
     use super::*;
 
     #[test]
+    fn variant_types_image_asset_lists_its_scales() {
+        let files = type_definitions(&[]);
+        let (_, types) = files
+            .iter()
+            .find(|(path, _)| path == "nsh/types.d.ts")
+            .expect("nsh/types.d.ts");
+        let at = types
+            .find("export interface ImageAsset {")
+            .expect("ImageAsset");
+        let asset = &types[at..at + types[at..].find("\n}").unwrap()];
+        assert!(asset.contains("  scales?: number[];"), "{asset}");
+        assert!(asset.contains("The image loads the one for the screen's pixel ratio."));
+    }
+
+    #[test]
+    fn default_export_statements_name_the_default_namespace_value() {
+        assert_eq!(
+            exported_values(
+                r#"
+declare const moduleValue: { value: number };
+export default moduleValue;
+export declare const EOL: string;
+export interface Shape { default: string; }
+// export default ignored;
+declare const text: "export default ignored";
+"#
+            ),
+            ["default", "EOL"]
+        );
+        for source in [
+            "export default class Example {}",
+            "export default function example(): void;",
+            "export default\n  moduleValue;",
+        ] {
+            assert_eq!(exported_values(source), ["default"], "{source}");
+        }
+    }
+
+    #[test]
+    fn generated_os_declaration_really_exports_its_typed_default_object() {
+        let files = bodies(&[]);
+        let (_, os) = files.iter().find(|(path, _)| path == "os.d.ts").unwrap();
+        assert!(os.contains("declare const defaultExport: {"), "{os}");
+        assert!(os.contains("readonly EOL: string;"), "{os}");
+        assert!(os.contains("export default defaultExport;"), "{os}");
+        let mut values = exported_values(os);
+        values.sort();
+        assert_eq!(values, ["EOL", "arch", "default", "homedir", "platform"]);
+    }
+
+    #[test]
     fn paths_are_relative() {
         assert_eq!(relative("nsh/list.d.ts", "nsh/types.d.ts"), "./types");
-        assert_eq!(relative("nsh/ui/mobile.d.ts", "nsh/types.d.ts"), "../types");
-        assert_eq!(
-            relative("nsh/types.d.ts", "nsh/ui/mobile.d.ts"),
-            "./ui/mobile"
-        );
+        assert_eq!(relative("nsh/acme/ui.d.ts", "nsh/types.d.ts"), "../types");
+        assert_eq!(relative("nsh/types.d.ts", "nsh/acme/ui.d.ts"), "./acme/ui");
     }
 
     #[test]
     fn references_skip_members_strings_and_declarations() {
         let (used, local) = references(
-            "/** A `Foo` */\nexport interface Bar<T> { a: JSX.Element; b: \"Baz\"; c: Qux<T> }",
+            "/** A `Foo` */\nexport interface Bar<T> { a: JSX.Element; b: \"Baz\"; c: Qux<T>; safeArea?: Quux }",
         );
+        assert!(used.contains(&"Quux".to_owned()));
+        assert!(!used.contains(&"safeArea".to_owned()));
         assert!(used.contains(&"JSX".to_owned()));
         assert!(used.contains(&"Qux".to_owned()));
         assert!(!used.contains(&"Element".to_owned()));
@@ -614,7 +819,7 @@ mod tests {
     /// A name a file imports is declared in one file only.
     #[test]
     fn imports_are_unambiguous() {
-        let files = bodies(&[nsh_ui_mobile::registry()]);
+        let files = bodies(&[nsh_base::registry().into()]);
         let mut owners: BTreeMap<String, Vec<&str>> = BTreeMap::new();
         for (path, body) in &files {
             for name in exported_names(body) {
@@ -730,9 +935,9 @@ mod tests {
             })
             .unwrap();
         let rt = rquickjs::Runtime::new().unwrap();
-        let ctx = rquickjs::Context::full(&rt).unwrap();
-        let bare: Vec<String> = ctx.with(|ctx| {
-            let list: String = ctx
+        let cx = rquickjs::Context::full(&rt).unwrap();
+        let bare: Vec<String> = cx.with(|cx| {
+            let list: String = cx
                 .eval("Object.getOwnPropertyNames(globalThis).join(' ')")
                 .unwrap();
             names(&list)
@@ -753,17 +958,16 @@ mod tests {
     }
 
     /// What each module exports at run time is what its declarations say
-    /// (with a set of classes besides the UI set).
+    /// (with a set of classes besides the UI sets).
     #[test]
     fn declarations_match_the_modules() {
-        let ui = nsh_ui_mobile::registry();
-        let classes = crate::classes::tests::registry();
+        let sets = vec![nsh_base::registry(), crate::classes::tests::registry()];
         let host = crate::Host::with_options(crate::HostOptions {
-            ui_sets: vec![ui.clone(), classes.clone()],
+            ui_sets: sets.clone(),
             ..crate::HostOptions::default()
         })
         .unwrap();
-        let files = bodies(&[ui, classes]);
+        let files = bodies(&sets.iter().cloned().map(Into::into).collect::<Vec<_>>());
         assert!(
             files.iter().any(|(path, body)| path == "test/classes.d.ts"
                 && body.contains("export declare class Tally {")),

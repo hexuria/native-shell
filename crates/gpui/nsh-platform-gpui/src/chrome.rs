@@ -35,7 +35,8 @@
 //! ([`menus`]), with keyboard access (F10, Alt + a menu's initial, arrows,
 //! Return, Escape). Window operations need the GPUI window, which batches
 //! and keys do not have: they are queued ([`Op`]) and carried out when the
-//! view renders next ([`render`]).
+//! view renders next ([`render`]). Activation instead runs in a main-thread
+//! window update, so a minimized window can be restored without a frame.
 //!
 //! Keys: the standalone app's reserved keys (Ctrl+Q / F11; on macOS Cmd+Q,
 //! Cmd+H, Opt+Cmd+H, Cmd+M, Ctrl+Cmd+F) and the open menu's come first
@@ -53,9 +54,9 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, Bounds, CursorStyle, DispatchPhase, Hitbox, HitboxBehavior, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, ResizeEdge,
-    Styled, Window, WindowControlArea, canvas, div, prelude::*, px,
+    AnyElement, AnyWindowHandle, App, Bounds, CursorStyle, DispatchPhase, Hitbox, HitboxBehavior,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
+    ResizeEdge, Styled, Window, WindowControlArea, canvas, div, prelude::*, px,
 };
 // Text fields' and selectable text's context menus (`text_input.rs`,
 // `text.rs`) show their items with these.
@@ -63,7 +64,7 @@ pub(crate) use menus::{LocalItem, popup_actions};
 use nsh_core::{
     EventKind, EventPayload, PayloadValue, ROOT_ID,
     desktop::{DesktopCommand, Key, MenuItem, MenuRole, Shortcut, TitleBarStyle},
-    platform::Insets,
+    geometry::{Edges as Insets, Points},
 };
 
 use crate::{
@@ -139,6 +140,8 @@ pub(crate) struct Chrome {
     /// The surface fills a window of its own ([`set_standalone`]); an
     /// embedded surface's host owns the window: only context menus work.
     standalone: Cell<bool>,
+    /// Activation must work even while the window is not rendering.
+    window: Cell<Option<AnyWindowHandle>>,
     style: Cell<TitleBarStyle>,
     /// The app's title bar's height (`Window.setTitleBar`'s).
     height: Cell<Option<f32>>,
@@ -169,9 +172,10 @@ pub(crate) struct Chrome {
 
 /// The surface fills a window of its own titled `title`: the window's
 /// chrome is the app's.
-pub(crate) fn set_standalone(surface: &Surface, title: &str) {
+pub(crate) fn set_standalone(surface: &Surface, title: &str, window: AnyWindowHandle) {
     let c = &surface.chrome;
     c.standalone.set(true);
+    c.window.set(Some(window));
     c.active.set(true);
     *c.title.borrow_mut() = title.to_owned();
     c.menu_changed.set(true);
@@ -230,7 +234,8 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
             push(surface, Op::Title(title.clone()));
         }
         DesktopCommand::SetTitleBar { style, height } => {
-            let changed = c.height.replace(*height) != *height;
+            let height = height.map(|h| h.0);
+            let changed = c.height.replace(height) != height;
             if c.style.replace(*style) != *style || changed {
                 menus::close(surface);
                 push(surface, Op::TitleBar);
@@ -242,6 +247,18 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
         // GPUI's window bounds are chosen when the window opens, and it
         // has no window levels.
         DesktopCommand::SetFrame(_) | DesktopCommand::SetLevel(_) => {}
+        DesktopCommand::OrderFront => {
+            if let Some(handle) = c.window.get() {
+                // A minimized window may never render the queued chrome ops.
+                crate::rt::on_app(move |cx| {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        restore_minimized(window);
+                        cx.activate(true);
+                        window.activate_window();
+                    });
+                });
+            }
+        }
         DesktopCommand::Close => push(surface, Op::Close),
         DesktopCommand::SetMenu(menu) => {
             *c.menu.borrow_mut() = menu.clone();
@@ -251,9 +268,9 @@ pub(crate) fn command(surface: &Rc<Surface>, command: &DesktopCommand) {
         }
         DesktopCommand::PopupMenu { items, at } => {
             let anchor = match at {
-                Some((x, y)) => {
+                Some(at) => {
                     let (ox, oy) = surface.origin.get();
-                    menus::Anchor::Point(x + ox, y + oy)
+                    menus::Anchor::Point(at.x.0 + ox, at.y.0 + oy)
                 }
                 None => menus::Anchor::Pointer,
             };
@@ -490,6 +507,29 @@ pub(crate) fn shortcut(surface: &Rc<Surface>, event: &KeyEvent) -> bool {
 
 // --- The window -------------------------------------------------------------------------
 
+/// AppKit's activation does not restore a miniaturized window. Other
+/// platforms restore it through GPUI's native activation implementation.
+fn restore_minimized(_window: &Window) {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::NSView;
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        if let Ok(handle) = HasWindowHandle::window_handle(_window)
+            && let RawWindowHandle::AppKit(handle) = handle.as_raw()
+        {
+            // SAFETY: GPUI owns this live NSView, and window updates run on
+            // AppKit's main thread. The borrowed reference stays in this call.
+            let view = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
+            if let Some(window) = view.window()
+                && window.isMiniaturized()
+            {
+                window.deminiaturize(None);
+            }
+        }
+    }
+}
+
 /// Carries out the queued window operations.
 fn apply_ops(surface: &Surface, window: &mut Window, cx: &mut App) {
     let ops = std::mem::take(&mut *surface.chrome.ops.borrow_mut());
@@ -553,24 +593,24 @@ fn title_bar_area(
     shown: bool,
     client_decorated: bool,
     height: Option<f32>,
-) -> Insets {
+) -> Insets<Points> {
     if !shown {
         return Insets::default();
     }
     match platform {
         Platform::Mac => Insets {
-            top: height.unwrap_or(MAC_TITLE_HEIGHT),
-            left: TRAFFIC_LIGHTS_X + TRAFFIC_LIGHTS_SIZE.1 + 8.0,
+            top: Points(height.unwrap_or(MAC_TITLE_HEIGHT)),
+            left: Points(TRAFFIC_LIGHTS_X + TRAFFIC_LIGHTS_SIZE.1 + 8.0),
             ..Insets::default()
         },
         Platform::Windows => Insets {
-            top: height.unwrap_or(WINDOWS_CAPTION_HEIGHT),
-            right: 3.0 * CAPTION_BUTTON_WIDTH,
+            top: Points(height.unwrap_or(WINDOWS_CAPTION_HEIGHT)),
+            right: Points(3.0 * CAPTION_BUTTON_WIDTH),
             ..Insets::default()
         },
         Platform::Linux if client_decorated => Insets {
-            top: height.unwrap_or(LINUX_HEADER_HEIGHT),
-            right: 3.0 * LINUX_BUTTON + 2.0 * LINUX_BUTTON_GAP + LINUX_BUTTON_MARGIN,
+            top: Points(height.unwrap_or(LINUX_HEADER_HEIGHT)),
+            right: Points(3.0 * LINUX_BUTTON + 2.0 * LINUX_BUTTON_GAP + LINUX_BUTTON_MARGIN),
             ..Insets::default()
         },
         Platform::Linux => Insets::default(),
@@ -649,7 +689,7 @@ pub(crate) fn render(
                 .absolute()
                 .top_0()
                 .right_0()
-                .child(controls(surface, height, &theme)),
+                .child(controls(surface, height.0, &theme)),
         );
     }
     root = root.child(body);
@@ -680,7 +720,12 @@ fn drag_area(surface: &Rc<Surface>) -> impl IntoElement {
                 crate::input::window_drag_rects(&drag)
                     .into_iter()
                     .map(|r| {
-                        let b = crate::render::bounds(ox + r.x, oy + r.y, r.width, r.height);
+                        let b = crate::render::bounds(
+                            ox + r.origin.x.0,
+                            oy + r.origin.y.0,
+                            r.size.width.0,
+                            r.size.height.0,
+                        );
                         window.insert_hitbox(b.intersect(&bounds), HitboxBehavior::Normal)
                     })
                     .collect()
@@ -1303,6 +1348,37 @@ mod tests {
 
     use super::*;
 
+    #[gpui::test]
+    fn order_front_activates_without_rendering_and_leaves_embedded_windows_alone(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext;
+
+        let (surface, target, other, _app) = cx.update(|cx| {
+            let app = crate::rt::init_test_app(cx);
+            let target = cx
+                .open_window(Default::default(), |_, cx| cx.new(|_| gpui::Empty))
+                .unwrap();
+            let other = cx
+                .open_window(Default::default(), |_, cx| cx.new(|_| gpui::Empty))
+                .unwrap();
+            other
+                .update(cx, |_, window, _| window.activate_window())
+                .unwrap();
+            (Surface::new(Default::default()), target, other, app)
+        });
+        cx.run_until_parked();
+        command(&surface, &DesktopCommand::OrderFront);
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(cx.active_window(), Some(other.into())));
+
+        set_standalone(&surface, "Target", target.into());
+        command(&surface, &DesktopCommand::OrderFront);
+        // No frame is rendered: activation must not depend on the render queue.
+        cx.run_until_parked();
+        cx.update(|cx| assert_eq!(cx.active_window(), Some(target.into())));
+    }
+
     #[test]
     fn title_bar_areas() {
         assert_eq!(
@@ -1311,11 +1387,11 @@ mod tests {
         );
         let windows = title_bar_area(Platform::Windows, true, false, Some(40.0));
         assert_eq!(
-            (windows.top, windows.right, windows.left),
+            (windows.top.0, windows.right.0, windows.left.0),
             (40.0, 138.0, 0.0)
         );
         let mac = title_bar_area(Platform::Mac, true, false, None);
-        assert_eq!((mac.top, mac.left, mac.right), (28.0, 71.0, 0.0));
+        assert_eq!((mac.top.0, mac.left.0, mac.right.0), (28.0, 71.0, 0.0));
         // Linux reports an area only when the window draws its own
         // decorations.
         assert_eq!(
@@ -1323,7 +1399,7 @@ mod tests {
             Insets::default()
         );
         let linux = title_bar_area(Platform::Linux, true, true, None);
-        assert_eq!((linux.top, linux.right), (46.0, 98.0));
+        assert_eq!((linux.top.0, linux.right.0), (46.0, 98.0));
     }
 
     #[test]

@@ -5,14 +5,15 @@ use std::{
 };
 
 use anyhow::{Context as _, bail};
+use nsh_core::js::HostLimits;
 use serde::Deserialize;
 
 use crate::{dev::DevSession, runtime::Platform, ui};
 
 const APP_NAME: &str = "NshDev";
-const BUNDLE_ID: &str = "com.longbridge.nsh.host";
+pub(crate) const BUNDLE_ID: &str = "com.longbridge.nsh.host";
 
-/// Where `nsh run` runs the app.
+/// Where `nsh dev` and `nsh run` run the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub(crate) enum Target {
     /// The Mac Catalyst development host (an iPhone-sized window).
@@ -31,27 +32,26 @@ pub(crate) enum Target {
     /// page).
     Web,
     /// The GPUI development host, in a window on this machine (macOS,
-    /// Windows or Linux).
+    /// Windows or Linux): the app as GPUI apps that embed it show it.
     Gpui,
 }
 
 impl Target {
-    /// The default: the host that runs on this machine (Mac Catalyst on
-    /// macOS, the GTK host on Linux, the Win32 host on Windows; Android
-    /// elsewhere).
+    /// The default: this system’s native desktop host (AppKit on macOS,
+    /// GTK on Linux, Win32 on Windows; the browser elsewhere).
     pub(crate) fn native() -> Target {
         if cfg!(target_os = "macos") {
-            Target::Catalyst
+            Target::Macos
         } else if cfg!(target_os = "linux") {
             Target::Linux
         } else if cfg!(windows) {
             Target::Windows
         } else {
-            Target::Android
+            Target::Web
         }
     }
 
-    fn platform(self) -> crate::runtime::Platform {
+    pub(crate) fn platform(self) -> crate::runtime::Platform {
         match self {
             Target::Catalyst => crate::runtime::Platform::MacCatalyst,
             Target::Linux => crate::runtime::Platform::Linux,
@@ -65,13 +65,66 @@ impl Target {
     }
 }
 
-/// What the development host shows besides the app.
+/// How the development host runs the app and what it shows besides it.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct HostFlags {
+    /// The VM limits an embedding app would set (`--limits`); `None`: none,
+    /// as an app on its own.
+    pub(crate) limits: Option<HostLimits>,
     /// Log per-commit timings.
     pub(crate) trace: bool,
     /// The performance monitor (the macOS host's).
     pub(crate) fps: bool,
+}
+
+/// The host window's own options: the desktop hosts take the size
+/// ([`HostWindow::check`]), the macOS host the name too.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct HostWindow<'a> {
+    /// The app's name in the host (the menu bar, the window title).
+    pub(crate) name: Option<&'a str>,
+    /// The window's initial size, `WxH` in points.
+    pub(crate) size: Option<&'a str>,
+}
+
+impl HostWindow<'_> {
+    /// Refuses the options `target`'s host does not take. An app of Rust
+    /// only (`rust_root`) runs in its runner on macOS, Linux and Windows;
+    /// GPUI has no runner (it is the backend for embedding in GPUI apps),
+    /// so such an app does not run there at all.
+    fn check(&self, target: Target, rust_root: bool) -> anyhow::Result<()> {
+        if rust_root && target == Target::Gpui {
+            bail!(
+                "a Rust app runs on this OS's own backend (--target macos, linux or windows); \
+                 GPUI apps embed its root with AppView"
+            );
+        }
+        let desktop = matches!(
+            target,
+            Target::Macos | Target::Linux | Target::Windows | Target::Gpui
+        );
+        if self.name.is_some() && (target != Target::Macos || rust_root) {
+            bail!(
+                "--name needs --target macos and a TSX entry (the other hosts do not take it yet)"
+            );
+        }
+        if self.size.is_some() && (!desktop || rust_root) {
+            bail!(
+                "--window-size needs a desktop host (--target macos, linux, windows or gpui) and a TSX entry"
+            );
+        }
+        Ok(())
+    }
+
+    /// The arguments of the size, for a desktop host.
+    fn args(&self) -> Vec<&str> {
+        let mut args = Vec::new();
+        if let Some(size) = self.size {
+            // `WxH` in points; the host opens the window at this size.
+            args.extend(["--window-size", size]);
+        }
+        args
+    }
 }
 
 /// Starts a dev session and runs the app in a development host, which
@@ -83,11 +136,13 @@ pub(crate) fn run(
     flags: HostFlags,
     target: Target,
     device: Option<&str>,
+    window: HostWindow<'_>,
 ) -> anyhow::Result<()> {
-    let HostFlags { trace, fps } = flags;
+    let HostFlags { limits, trace, fps } = flags;
     if fps && target != Target::Macos {
         bail!("--fps needs --target macos (the other hosts have no performance monitor yet)");
     }
+    window.check(target, crate::rust_app::is_root(entry))?;
     let work = dunce::canonicalize(entry)?
         .parent()
         .context("entry has no directory")?
@@ -96,10 +151,10 @@ pub(crate) fn run(
         return run_rust_app(entry, port, target, device, &work);
     }
     if target == Target::Android {
-        return run_android(entry, port, release, &work, trace);
+        return run_android(entry, port, release, limits, &work, trace);
     }
     if target == Target::Web {
-        return run_web(entry, port, release);
+        return run_web(entry, port, release, limits);
     }
     // The host a previous session left running would connect to this one
     // until it is replaced.
@@ -118,7 +173,7 @@ pub(crate) fn run(
         | Target::Gpui => None,
     };
     // The host it starts connects by itself: no addresses to show.
-    let session = DevSession::start(entry, port, release)?;
+    let session = DevSession::start(entry, port, release, limits)?;
     let host = crate::runtime::file(target.platform(), false)?;
     let mut args = vec!["--dev-server".to_owned(), session.local_url()];
     if trace {
@@ -133,6 +188,7 @@ pub(crate) fn run(
             let exe = app.join("Contents/MacOS/nsh-ios-host");
             // Its own output (AppKit's notes) is kept for when it fails.
             let mut command = Command::new(&exe);
+            command.env("NSH_DEV_APP_DIR", work.parent().expect("source directory"));
             command
                 .args(&args)
                 // A host that crashed must not ask to reopen its windows
@@ -144,33 +200,50 @@ pub(crate) fn run(
         // bundle around it.
         Target::Linux => {
             let mut command = Command::new(&host);
-            command.args(&args);
+            command.env("NSH_DEV_APP_DIR", work.parent().expect("source directory"));
+            command
+                .args(&args)
+                .args(["--app-id", &crate::package::app_id(entry)?])
+                .args(window.args());
             run_local(&session, &mut command, "the Linux host")
         }
         // In place too: the AppKit host makes itself a regular app (menu
         // bar, Dock icon) without an app bundle around it.
         Target::Macos => {
-            // The menu bar and the window show the app's name.
+            // The menu bar and the window show the app's name; `--name`
+            // overrides it (a host run for one of the app's windows can
+            // name itself).
             let entry = entry.canonicalize()?;
             let config = crate::package::read_config(&entry).unwrap_or_default();
-            let (name, _) = crate::package::name_and_id(&entry, &config);
+            let (app_name, id) = crate::package::name_and_id(&entry, &config);
+            let name = window.name.unwrap_or(&app_name);
             let mut command = Command::new(&host);
+            command.env("NSH_DEV_APP_DIR", work.parent().expect("source directory"));
             command
                 .args(&args)
-                .args(["--name", &name])
-                .args(["-ApplePersistenceIgnoreState", "YES"]);
+                .args(["--name", name, "--app-id", &id])
+                .args(["-ApplePersistenceIgnoreState", "YES"])
+                .args(window.args());
             run_local(&session, &mut command, "the macOS host")
         }
         Target::Windows => {
             let mut command = Command::new(&host);
-            command.args(&args);
+            command.env("NSH_DEV_APP_DIR", work.parent().expect("source directory"));
+            command
+                .args(&args)
+                .args(["--app-id", &crate::package::app_id(entry)?])
+                .args(window.args());
             run_local(&session, &mut command, "the Windows host")
         }
         // In place on every OS: GPUI makes the process a regular app (on
         // macOS too) without an app bundle around it.
         Target::Gpui => {
             let mut command = Command::new(&host);
-            command.args(&args);
+            command.env("NSH_DEV_APP_DIR", work.parent().expect("source directory"));
+            command
+                .args(&args)
+                .args(["--app-id", &crate::package::app_id(entry)?])
+                .args(window.args());
             run_local(&session, &mut command, "the GPUI host")
         }
         Target::Ios => {
@@ -202,10 +275,15 @@ pub(crate) fn run(
 /// address, on a phone) runs the app until the session ends. The browser
 /// is the user's to open: a session that starts again (the app's Rust code
 /// changed) finds its page still open, and it reloads by itself.
-fn run_web(entry: &Path, port: u16, release: bool) -> anyhow::Result<()> {
+fn run_web(
+    entry: &Path,
+    port: u16,
+    release: bool,
+    limits: Option<HostLimits>,
+) -> anyhow::Result<()> {
     // Built first in a checkout: the session serves the runtime it finds.
     crate::runtime::web(crate::runtime::WebKind::Dev, true)?.context("no web runtime")?;
-    let session = DevSession::start(entry, port, release)?;
+    let session = DevSession::start(entry, port, release, limits)?;
     session.print_web_url();
     session.watch(|| Ok(false))
 }
@@ -250,7 +328,7 @@ fn run_rust_app(
     };
     let run = work.join("rust");
     match target {
-        Target::Linux | Target::Macos | Target::Windows | Target::Gpui => {
+        Target::Linux | Target::Macos | Target::Windows => {
             let runner = crate::runtime::file(target.platform(), false)?;
             let dir = run.join("run/nsh");
             resources(&dir)?;
@@ -339,10 +417,11 @@ fn run_rust_app(
         }
         Target::Web => {
             crate::runtime::web(crate::runtime::WebKind::Dev, true)?.context("no web runtime")?;
-            let session = DevSession::start(&entry, port, false)?;
+            let session = DevSession::start(&entry, port, false, None)?;
             session.print_web_url();
             session.watch(|| Ok(false))
         }
+        Target::Gpui => unreachable!("refused by HostWindow::check"),
     }
 }
 
@@ -485,72 +564,17 @@ fn run_android(
     entry: &Path,
     port: u16,
     release: bool,
+    limits: Option<HostLimits>,
     work: &Path,
     trace: bool,
 ) -> anyhow::Result<()> {
-    use crate::android::{self, Apk, Signing};
+    use crate::android;
     let sdk = android::Sdk::find()?;
     let serial = android::device(&sdk)?;
     // As on iOS: the host of a previous session must not connect first.
     let _ = android::adb(&sdk, &serial, &["shell", "am", "force-stop", BUNDLE_ID]);
-    let session = DevSession::start(entry, port, release)?;
-    let runtime = crate::runtime::android(true)?;
-    let apk_path = work.join("android/NshDev.apk");
-    fs::create_dir_all(apk_path.parent().context("apk dir")?)?;
-    let stamp = work.join("android/runtime.stamp");
-    // Every app's development host is the same package: another app's run
-    // (an app with its own Rust crate has its own runtime) or another
-    // device replaces what this app installed. The device's install time
-    // tells whether the host there is still the one this app installed.
-    let installed = work.join("android/installed");
-    let version = runtime_version(&runtime)?;
-    let built =
-        apk_path.exists() && fs::read_to_string(&stamp).ok().as_deref() == Some(version.as_str());
-    if !built {
-        let step = ui::Step::start("building the Android development host");
-        android::build_apk(
-            &sdk,
-            &Apk {
-                package: BUNDLE_ID,
-                label: APP_NAME,
-                version_name: "0.1.0",
-                version_code: 1,
-                activity: "com.longbridge.nsh.DevActivity",
-                dev: true,
-                rust: false,
-                dark: false,
-                runtime: &runtime,
-                icon: None,
-                assets: Vec::new(),
-                signing: Signing::Debug,
-            },
-            &apk_path,
-        )?;
-        step.done("built the Android development host");
-        // Until it is installed, no device has this build.
-        let _ = fs::remove_file(&installed);
-        fs::write(&stamp, &version)?;
-    }
-    let on_device =
-        |sdk: &android::Sdk| installed_host(sdk, &serial).map(|time| format!("{serial} {time}"));
-    let current = fs::read_to_string(&installed).ok();
-    if current.is_none() || current != on_device(&sdk) {
-        let step = ui::Step::start(format!("installing it on {serial}"));
-        android::adb(
-            &sdk,
-            &serial,
-            &["install", "-r", "-t", &apk_path.to_string_lossy()],
-        )?;
-        step.done(format!(
-            "installed the Android development host on {serial}"
-        ));
-        match on_device(&sdk) {
-            Some(record) => fs::write(&installed, record)?,
-            None => {
-                let _ = fs::remove_file(&installed);
-            }
-        }
-    }
+    let session = DevSession::start(entry, port, release, limits)?;
+    install_android_host(&sdk, &serial, work, &crate::runtime::android(true)?)?;
     // The device reaches the dev server on its own 127.0.0.1, until the
     // run ends.
     let _reverse = android::Reverse::add(&sdk, &serial, session.port())?;
@@ -575,6 +599,75 @@ fn run_android(
     let result = session.watch(|| Ok(false));
     let _ = android::adb(&sdk, &serial, &["shell", "am", "force-stop", BUNDLE_ID]);
     result
+}
+
+/// Builds the Android development host (when its runtime changed) into
+/// `work` and installs it on device `serial` (when the device does not have
+/// this build).
+pub(crate) fn install_android_host(
+    sdk: &crate::android::Sdk,
+    serial: &str,
+    work: &Path,
+    runtime: &Path,
+) -> anyhow::Result<()> {
+    use crate::android::{self, Apk, Signing};
+    let apk_path = work.join("android/NshDev.apk");
+    fs::create_dir_all(apk_path.parent().context("apk dir")?)?;
+    let stamp = work.join("android/runtime.stamp");
+    // Every app's development host is the same package: another app's run
+    // (an app with its own Rust crate has its own runtime) or another
+    // device replaces what this app installed. The device's install time
+    // tells whether the host there is still the one this app installed.
+    let installed = work.join("android/installed");
+    let version = runtime_version(runtime)?;
+    let built =
+        apk_path.exists() && fs::read_to_string(&stamp).ok().as_deref() == Some(version.as_str());
+    if !built {
+        let step = ui::Step::start("building the Android development host");
+        android::build_apk(
+            sdk,
+            &Apk {
+                package: BUNDLE_ID,
+                label: APP_NAME,
+                version_name: "0.1.0",
+                version_code: 1,
+                activity: "com.longbridge.nsh.DevActivity",
+                dev: true,
+                rust: false,
+                dark: false,
+                runtime,
+                icon: None,
+                assets: Vec::new(),
+                signing: Signing::Debug,
+            },
+            &apk_path,
+        )?;
+        step.done("built the Android development host");
+        // Until it is installed, no device has this build.
+        let _ = fs::remove_file(&installed);
+        fs::write(&stamp, &version)?;
+    }
+    let on_device =
+        |sdk: &android::Sdk| installed_host(sdk, serial).map(|time| format!("{serial} {time}"));
+    let current = fs::read_to_string(&installed).ok();
+    if current.is_none() || current != on_device(sdk) {
+        let step = ui::Step::start(format!("installing it on {serial}"));
+        android::adb(
+            sdk,
+            serial,
+            &["install", "-r", "-t", &apk_path.to_string_lossy()],
+        )?;
+        step.done(format!(
+            "installed the Android development host on {serial}"
+        ));
+        match on_device(sdk) {
+            Some(record) => fs::write(&installed, record)?,
+            None => {
+                let _ = fs::remove_file(&installed);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// When the development host on device `serial` was installed or last
@@ -620,7 +713,7 @@ fn package_catalyst(work: &Path, host: &Path) -> anyhow::Result<PathBuf> {
 
 /// Creates (or refreshes) `<work>/ios/NshDev.app`, a flat iOS app bundle,
 /// signed ad hoc (the simulator requires a signature).
-fn package_ios(work: &Path, host: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn package_ios(work: &Path, host: &Path) -> anyhow::Result<PathBuf> {
     let app = work.join("ios").join(format!("{APP_NAME}.app"));
     fs::create_dir_all(&app)?;
     fs::write(app.join("Info.plist"), info_plist(Target::Ios))?;
@@ -807,7 +900,58 @@ fn info_plist(target: Target) -> String {
 mod tests {
     use clap::ValueEnum as _;
 
-    use super::Target;
+    use super::{HostWindow, Target};
+
+    /// `--window-size` reaches every desktop host; GPUI runs no app of
+    /// Rust only.
+    #[test]
+    fn the_desktop_hosts_take_a_size() {
+        for target in [Target::Macos, Target::Linux, Target::Windows] {
+            assert!(
+                HostWindow::default().check(target, true).is_ok(),
+                "Rust app, {target:?}"
+            );
+        }
+        assert!(HostWindow::default().check(Target::Gpui, true).is_err());
+        let sized = HostWindow {
+            size: Some("700x500"),
+            ..HostWindow::default()
+        };
+        for target in [Target::Macos, Target::Linux, Target::Windows, Target::Gpui] {
+            assert!(sized.check(target, false).is_ok(), "{target:?}");
+        }
+        for target in [Target::Catalyst, Target::Ios, Target::Android, Target::Web] {
+            assert!(sized.check(target, false).is_err(), "{target:?}");
+        }
+        assert_eq!(sized.args(), ["--window-size", "700x500"]);
+        let named = HostWindow {
+            name: Some("Orders"),
+            ..HostWindow::default()
+        };
+        assert!(named.check(Target::Macos, false).is_ok());
+        assert!(named.check(Target::Linux, false).is_err());
+    }
+
+    /// The desktop hosts get each app's own id, so each keeps its own data.
+    #[test]
+    fn hosts_get_the_apps_id() {
+        let dir = std::env::temp_dir().join(format!("nsh-run-app-id-{}", std::process::id()));
+        let (named, unnamed) = (dir.join("named"), dir.join("Notes"));
+        for app in [&named, &unnamed] {
+            std::fs::create_dir_all(app).unwrap();
+            std::fs::write(app.join("App.tsx"), "").unwrap();
+        }
+        std::fs::write(named.join("nsh.json"), r#"{ "id": "com.acme.orders" }"#).unwrap();
+        assert_eq!(
+            crate::package::app_id(&named.join("App.tsx")).unwrap(),
+            "com.acme.orders"
+        );
+        assert_eq!(
+            crate::package::app_id(&unnamed.join("App.tsx")).unwrap(),
+            "com.example.notes"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn gpui_is_a_target_with_its_own_host() {

@@ -120,7 +120,7 @@
         if (running?.session === session && running.version === message.version) return;
         running = { session, version: message.version };
         problem.hidden = true;
-        player.run(text(frames[0]), { capabilities: message.capabilities ?? "", sourceMap: text(frames[1]) });
+        player.run(text(frames[0]), { capabilities: message.capabilities ?? "", sourceMap: text(frames[1]), appId: message.app_id ?? "", limits: message.limits ?? null });
         return;
       }
     }
@@ -145,7 +145,7 @@
         return;
       }
       // No bytecode version: this host runs JS source.
-      send({ type: "hello", protocol: PROTOCOL, bytecode_version: "", device: device(), platform: "web", ui_sets: UI_SETS });
+      send({ type: "hello", protocol: PROTOCOL, bytecode_version: "", device: device(), platform: "web", ui_sets: UI_SETS, tests: player.takesTests });
     };
     socket.onmessage = (event) => {
       if (typeof event.data !== "string") {
@@ -162,11 +162,32 @@
       switch (message.type) {
         case "hello":
           session = message.session ?? 0;
+          // A test session (`nsh test --target web`): the model of the app
+          // starts before its first bundle.
+          if (message.test) player.testStart();
           showStatus("");
-          if (RUST && !running) {
+          // A test session's Rust app starts when the server says so,
+          // after what the test sets it up with.
+          if (RUST && !running && !message.test) {
             running = { session, version: 0 };
             player.runRust();
           }
+          break;
+        case "test_setup":
+          player.onTestSend = send;
+          player.testSetup(message.storage, message.trace);
+          break;
+        case "fetch":
+          player.testFetchReply(message.id, message.reply);
+          break;
+        case "step":
+          send({ type: "step_done", id: message.id, outcome: player.testStep(message.step) });
+          break;
+        case "root":
+          // The app is this runtime's own Rust root (a test session's).
+          running = { session, version: 0 };
+          showStatus("");
+          player.runRust();
           break;
         case "building":
           showStatus("Building…");

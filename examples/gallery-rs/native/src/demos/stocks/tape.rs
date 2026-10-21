@@ -4,9 +4,9 @@
 use std::f32::consts::TAU;
 
 use nsh_core::{
-    Rect,
+    Bounds, Points,
+    animation::{Curve, EaseMode},
     canvas::{CanvasTextAlign, CanvasTextBaseline},
-    nsh_animation::{Curve, EaseMode},
     ui::prelude::*,
 };
 
@@ -15,9 +15,9 @@ use super::{
     detail::StockProps,
     figure, live,
     market::{self, BLOCK, BUCKETS, TAPE, TAPE_HELD, Trade, compact, price, time},
-    parts::{Block, Col, GRID, SpringBar, SpringBarProps, head, spring_bar},
+    parts::{Block, Col, GRID, head, spring_bar},
 };
-use crate::ui::{colors, legend, tints};
+use crate::ui::{colors, legend, rect, tints};
 
 /// Rows shown.
 const SHOWN: usize = 8;
@@ -25,12 +25,12 @@ const ROW: f32 = 28.0;
 
 /// The newest trades (`shown`), drawn `width` wide with prices of
 /// `decimals`, slid down by `offset`.
-fn draw_tape(shown: &[Trade], width: f32, decimals: u32, offset: &NativeValue) -> Painter {
+fn draw_tape(shown: &[Trade], width: f32, decimals: u32, offset: &AnimatedValue) -> Painter {
     let height = SHOWN as f32 * ROW;
     let mut p = Painter::new()
         .save()
         .begin_path()
-        .rect(0.0, 0.0, width, height)
+        .rect(rect(0.0, 0.0, width, height))
         .clip()
         .translate(0.0, offset)
         .text_baseline(CanvasTextBaseline::Middle);
@@ -47,7 +47,7 @@ fn draw_tape(shown: &[Trade], width: f32, decimals: u32, offset: &NativeValue) -
             p = p
                 .fill_color(color(tints::ACCENT))
                 .begin_path()
-                .round_rect(0.0, top + 2.0, width, ROW - 4.0, 8.0)
+                .round_rect(rect(0.0, top + 2.0, width, ROW - 4.0), px(8.0))
                 .fill();
         } else if i > 0 {
             p = p
@@ -100,9 +100,8 @@ pub(crate) fn Tape(props: StockProps) -> impl IntoElement {
         quarter.get();
         market.borrow().tape.clone()
     });
-    let offset = native_value(0.0);
+    let offset = animated_value(0.0);
     {
-        let offset = offset.clone();
         // The newest trade shown so far (-1: none yet).
         let top = stored(-1_i64);
         effect(move || {
@@ -134,13 +133,13 @@ pub(crate) fn Tape(props: StockProps) -> impl IntoElement {
         })
         .h(px(SHOWN as f32 * ROW))
         .label("Recent trades")
-        .on_layout(move |frame: &Rect| width.set(frame.width)),
+        .on_layout(move |frame: &Bounds<Points>| width.set(frame.size.width.0)),
     )
 }
 
 /// The tape's section of stock `index`: its totals (every tick), the
 /// columns and the [`Tape`] (four times a second).
-pub(crate) fn tape(live: &Live, index: usize) -> Block {
+pub(crate) fn tape_block(live: &Live, index: usize) -> Block {
     let quote = live.quotes[index];
     let market = live.market.clone();
     // Bought at the ask, sold at the bid, and the blocks, over the trades
@@ -194,9 +193,7 @@ pub(crate) fn tape(live: &Live, index: usize) -> Block {
                 .child(head("PRICE", Col::Flex, false))
                 .child(head("SIZE", Col::Auto, true)),
         )
-        .child(Tape::element(StockProps {
-            stock: index as u32,
-        }))
+        .child(tape().stock(index as u32))
 }
 
 /// One bucket of `flow` (of its `max`): sold to the left of the middle,
@@ -237,12 +234,16 @@ fn flow_row(
             view()
                 .flex_row()
                 .items_center()
-                .child(view().flex_1().child(SpringBar::element(SpringBarProps {
-                    from_right: true,
-                    height: 10.0,
-                    radius: Some(3.0),
-                    ..spring_bar(move || sell() / max.get(), colors::DOWN)
-                })))
+                .child(
+                    view().flex_1().child(
+                        spring_bar()
+                            .share(move || (sell() / max.get()) as f32)
+                            .color(colors::DOWN)
+                            .from_right(true)
+                            .height(10.0)
+                            .radius(3.0),
+                    ),
+                )
                 .child(
                     view()
                         .w(px(2.0))
@@ -251,11 +252,15 @@ fn flow_row(
                         .rounded(px(1.0))
                         .bg(colors::BORDER),
                 )
-                .child(view().flex_1().child(SpringBar::element(SpringBarProps {
-                    height: 10.0,
-                    radius: Some(3.0),
-                    ..spring_bar(move || buy() / max.get(), colors::UP)
-                }))),
+                .child(
+                    view().flex_1().child(
+                        spring_bar()
+                            .share(move || (buy() / max.get()) as f32)
+                            .color(colors::UP)
+                            .height(10.0)
+                            .radius(3.0),
+                    ),
+                ),
         )
 }
 

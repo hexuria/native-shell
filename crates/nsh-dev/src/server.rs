@@ -3,7 +3,7 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -21,7 +21,8 @@ use axum::{
 use tokio::sync::broadcast;
 
 use crate::protocol::{
-    BundleFormat, ClientMessage, HostPlatform, LogLevel, PROTOCOL_VERSION, ServerMessage, WS_PATH,
+    BundleFormat, ClientMessage, FetchReply, HostPlatform, LogLevel, PROTOCOL_VERSION,
+    ServerMessage, StepOutcome, TestNetwork, TestStep, WS_PATH,
 };
 
 /// What a dev host did, for the server's owner to show ([`DevServer::start`]).
@@ -55,6 +56,13 @@ pub enum ClientEvent {
     },
     /// A log line from a host.
     Log(ClientLog),
+    /// The mount items of a batch a traced test session's app applied, a
+    /// line each ([`DevServer::set_test_trace`]); before the outcome of the
+    /// step it came in.
+    Trace {
+        /// The items.
+        items: Vec<String>,
+    },
 }
 
 /// A log line received from a dev host.
@@ -70,12 +78,24 @@ pub struct ClientLog {
     pub message: String,
 }
 
+/// What a published bundle says about its app.
+#[derive(Debug, Clone, Default)]
+pub struct AppInfo {
+    /// What the app declares it may reach (JSON), so development runs with
+    /// the same capabilities as the release.
+    pub capabilities: Option<String>,
+    /// The app's id (`nsh.json` `"id"`), which names where it keeps its
+    /// data.
+    pub id: Option<String>,
+}
+
 struct Bundle {
     version: u64,
     bytecode: axum::body::Bytes,
     source: axum::body::Bytes,
     source_map: Option<axum::body::Bytes>,
     capabilities: Option<String>,
+    app_id: Option<String>,
     /// The UI sets it imports.
     ui_sets: Arc<[String]>,
 }
@@ -91,6 +111,8 @@ struct Patch {
 
 #[derive(Clone)]
 enum Event {
+    /// The app is the host's own Rust root ([`DevServer::publish_root`]).
+    Root,
     Building,
     Failed(Arc<str>),
     Patch(Arc<Patch>),
@@ -108,6 +130,8 @@ struct Shared {
     web: Mutex<std::collections::HashMap<String, axum::body::Bytes>>,
     /// The commands that install the app's host, by platform.
     install: Mutex<std::collections::HashMap<HostPlatform, String>>,
+    /// The limits hosts run apps with ([`DevServer::set_limits`]).
+    limits: Mutex<Option<String>>,
     /// The state a newly connected client must see first.
     latest: Mutex<Option<Event>>,
     events: broadcast::Sender<Event>,
@@ -117,7 +141,26 @@ struct Shared {
     /// Hosts connected now.
     clients: AtomicUsize,
     on_event: Box<dyn Fn(ClientEvent) + Send + Sync>,
+    /// A test session ([`DevServer::test_session`]).
+    test: AtomicBool,
+    /// The connected hosts that take test steps, oldest first: their
+    /// connection's id and what sends it a message.
+    testers: Mutex<Vec<(u64, tokio::sync::mpsc::UnboundedSender<ServerMessage>)>>,
+    /// The steps waiting for an outcome, by id: their host's connection and
+    /// who waits.
+    steps: Mutex<std::collections::HashMap<u64, (u64, std::sync::mpsc::Sender<StepOutcome>)>>,
+    next_step: AtomicU64,
+    next_connection: AtomicU64,
+    /// What a test session's app starts with: its storage's entries.
+    test_storage: Mutex<Vec<(String, String)>>,
+    /// Whether a test session's app is traced ([`DevServer::set_test_trace`]).
+    test_trace: AtomicBool,
+    /// What answers a test session's app's requests.
+    test_network: Mutex<Option<Arc<dyn TestNetwork>>>,
 }
+
+/// What cancels the test's answers to requests, by id.
+type Cancels = std::collections::HashMap<u64, Box<dyn FnOnce() + Send>>;
 
 /// An id for this run of the server, different from earlier runs' (the
 /// clock and the process).
@@ -158,12 +201,21 @@ impl DevServer {
             files: Mutex::default(),
             web: Mutex::default(),
             install: Mutex::default(),
+            limits: Mutex::default(),
             latest: Mutex::new(None),
             events: broadcast::channel(16).0,
             bytecode_version: bytecode_version.into(),
             session: new_session(),
             clients: AtomicUsize::new(0),
             on_event: Box::new(on_event),
+            test: AtomicBool::new(false),
+            testers: Mutex::default(),
+            steps: Mutex::default(),
+            next_step: AtomicU64::new(1),
+            next_connection: AtomicU64::new(1),
+            test_storage: Mutex::default(),
+            test_trace: AtomicBool::new(false),
+            test_network: Mutex::new(None),
         });
         let listener = runtime.block_on(tokio::net::TcpListener::bind(addr))?;
         let addr = listener.local_addr()?;
@@ -216,6 +268,14 @@ impl DevServer {
         *self.shared.install.lock().expect("install lock") = commands.into_iter().collect();
     }
 
+    /// The VM limits hosts run the apps with, from the next bundle on:
+    /// those an embedding app would set (`nsh_core::js::HostLimits`'
+    /// syntax, as `nsh run --limits` takes them; empty: the embedding
+    /// defaults), or `None` (the default): none, as an app on its own.
+    pub fn set_limits(&self, limits: Option<String>) {
+        *self.shared.limits.lock().expect("limits lock") = limits;
+    }
+
     /// The bound address (useful with port 0).
     pub fn local_addr(&self) -> SocketAddr {
         self.addr
@@ -224,6 +284,74 @@ impl DevServer {
     /// The number of hosts connected now.
     pub fn clients(&self) -> usize {
         self.shared.clients.load(Ordering::Relaxed)
+    }
+
+    /// Makes this a test session (`nsh test --target`): hosts connecting
+    /// from now on are told to keep the model of their app that test steps
+    /// need ([`DevServer::step`]).
+    pub fn test_session(&self) {
+        self.shared.test.store(true, Ordering::Relaxed);
+    }
+
+    /// The storage a test session's app starts with, in place of its own
+    /// (hosts connecting from now on).
+    pub fn set_test_storage(&self, entries: Vec<(String, String)>) {
+        *self.shared.test_storage.lock().expect("storage lock") = entries;
+    }
+
+    /// Traces a test session's app (`nsh test --trace`; hosts connecting
+    /// from now on): its engine logs each commit's timings, and each batch
+    /// it applies comes as a [`ClientEvent::Trace`].
+    pub fn set_test_trace(&self, trace: bool) {
+        self.shared.test_trace.store(trace, Ordering::Relaxed);
+    }
+
+    /// What answers a test session's app's requests: without one, the
+    /// hosts make them themselves.
+    pub fn set_test_network(&self, network: Arc<dyn TestNetwork>) {
+        *self.shared.test_network.lock().expect("network lock") = Some(network);
+    }
+
+    /// Whether a host that takes test steps is connected.
+    pub fn has_tester(&self) -> bool {
+        !self.shared.testers.lock().expect("testers lock").is_empty()
+    }
+
+    /// Asks the host that connected last of those taking test steps to
+    /// take `step`, and waits for its outcome, `timeout` at most: what a
+    /// query gives (`null` for actions), or why it failed. Blocks: call it
+    /// off the server's threads.
+    pub fn step(&self, step: TestStep, timeout: Duration) -> Result<serde_json::Value, String> {
+        let shared = &self.shared;
+        let (connection, host) = shared
+            .testers
+            .lock()
+            .expect("testers lock")
+            .last()
+            .cloned()
+            .ok_or("no host that takes test steps is connected")?;
+        let id = shared.next_step.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = std::sync::mpsc::channel();
+        shared
+            .steps
+            .lock()
+            .expect("steps lock")
+            .insert(id, (connection, tx));
+        if host.send(ServerMessage::Step { id, step }).is_err() {
+            shared.steps.lock().expect("steps lock").remove(&id);
+            return Err("the host left".into());
+        }
+        let outcome = rx.recv_timeout(timeout);
+        shared.steps.lock().expect("steps lock").remove(&id);
+        match outcome {
+            Ok(StepOutcome::Done { value }) => Ok(value),
+            Ok(StepOutcome::Failed { message }) => Err(message),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(format!(
+                "the host did not take the step in {} s",
+                timeout.as_secs_f64()
+            )),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err("the host left".into()),
+        }
     }
 
     /// Announces that a rebuild started.
@@ -241,7 +369,7 @@ impl DevServer {
         bytecode: Vec<u8>,
         source: String,
         source_map: Option<String>,
-        capabilities: Option<String>,
+        app: AppInfo,
         patch: Option<(String, Option<String>)>,
         ui_sets: Vec<String>,
     ) {
@@ -268,9 +396,17 @@ impl DevServer {
             bytecode: bytecode.into(),
             source: source.into(),
             source_map: source_map.map(Into::into),
-            capabilities,
+            capabilities: app.capabilities,
+            app_id: app.id,
             ui_sets,
         })));
+    }
+
+    /// Publishes the app as the hosts' own Rust root (`nsh.json` `"root"`,
+    /// an app of Rust only, whose hosts are built with it): they run it in
+    /// place of a bundle.
+    pub fn publish_root(&self) {
+        self.set(Event::Root);
     }
 
     /// Publishes a build error; clients keep running the last good bundle
@@ -416,6 +552,7 @@ async fn serve_client(mut socket: WebSocket, shared: Arc<Shared>) -> Result<(), 
         device,
         platform,
         ui_sets,
+        tests,
     } = serde_json::from_str(&text)?
     else {
         return Err("expected hello".into());
@@ -441,6 +578,7 @@ async fn serve_client(mut socket: WebSocket, shared: Arc<Shared>) -> Result<(), 
         &ServerMessage::Hello {
             protocol: PROTOCOL_VERSION,
             session: shared.session,
+            test: shared.test.load(Ordering::Relaxed),
         },
     )
     .await?;
@@ -464,11 +602,24 @@ async fn serve_client(mut socket: WebSocket, shared: Arc<Shared>) -> Result<(), 
     };
     let device = host.device.clone();
     let _connection = Connection::new(&shared, &device, build);
+    // A host taking a test session's steps: steps reach it through `steps`.
+    let (step_tx, mut steps) = tokio::sync::mpsc::unbounded_channel();
+    let testing = tests && shared.test.load(Ordering::Relaxed);
+    let _tester = testing.then(|| Tester::new(&shared, step_tx.clone()));
+    if testing {
+        // Before the first bundle: what the app starts with.
+        let storage = shared.test_storage.lock().expect("storage lock").clone();
+        let trace = shared.test_trace.load(Ordering::Relaxed);
+        send(&mut socket, &ServerMessage::TestSetup { storage, trace }).await?;
+    }
+    // The app's requests the test answers, by id: what cancels them.
+    let fetches: Arc<Mutex<Cancels>> = Arc::default();
     if let Some(event) = latest {
         send_event(&mut socket, &shared, &mut host, &event).await?;
     }
     loop {
         tokio::select! {
+            Some(step) = steps.recv() => send(&mut socket, &step).await?,
             event = events.recv() => match event {
                 Ok(event) => send_event(&mut socket, &shared, &mut host, &event).await?,
                 Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -480,11 +631,45 @@ async fn serve_client(mut socket: WebSocket, shared: Arc<Shared>) -> Result<(), 
                 Err(broadcast::error::RecvError::Closed) => return Ok(()),
             },
             msg = socket.recv() => match msg {
-                Some(Ok(Message::Text(text))) => {
-                    if let Ok(ClientMessage::Log { level, target, message }) = serde_json::from_str(&text) {
+                Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
+                    Ok(ClientMessage::Log { level, target, message }) => {
                         (shared.on_event)(ClientEvent::Log(ClientLog { device: device.clone(), level, target, message }));
                     }
-                }
+                    Ok(ClientMessage::StepDone { id, outcome }) => {
+                        if let Some((_, waiting)) = shared.steps.lock().expect("steps lock").remove(&id) {
+                            let _ = waiting.send(outcome);
+                        }
+                    }
+                    Ok(ClientMessage::Fetch { id, request }) => {
+                        let network = shared.test_network.lock().expect("network lock").clone();
+                        let replies = step_tx.clone();
+                        match network {
+                            None => {
+                                let _ = replies.send(ServerMessage::Fetch { id, reply: FetchReply::Pass });
+                            }
+                            Some(network) => {
+                                let done = fetches.clone();
+                                let cancel = network.fetch(request, Box::new(move |reply| {
+                                    if matches!(reply, FetchReply::Pass | FetchReply::End | FetchReply::Failed { .. }) {
+                                        done.lock().expect("fetches lock").remove(&id);
+                                    }
+                                    let _ = replies.send(ServerMessage::Fetch { id, reply });
+                                }));
+                                fetches.lock().expect("fetches lock").insert(id, cancel);
+                            }
+                        }
+                    }
+                    Ok(ClientMessage::Trace { items }) => {
+                        (shared.on_event)(ClientEvent::Trace { items });
+                    }
+                    Ok(ClientMessage::FetchCancel { id }) => {
+                        let cancel = fetches.lock().expect("fetches lock").remove(&id);
+                        if let Some(cancel) = cancel {
+                            cancel();
+                        }
+                    }
+                    _ => {}
+                },
                 Some(Ok(_)) => {}
                 Some(Err(err)) => return Err(err.into()),
                 None => return Ok(()),
@@ -567,6 +752,41 @@ impl Drop for Connection<'_> {
     }
 }
 
+/// A host taking test steps, while it is connected: its steps fail when
+/// it leaves.
+struct Tester<'a> {
+    shared: &'a Shared,
+    id: u64,
+}
+
+impl<'a> Tester<'a> {
+    fn new(shared: &'a Shared, steps: tokio::sync::mpsc::UnboundedSender<ServerMessage>) -> Self {
+        let id = shared.next_connection.fetch_add(1, Ordering::Relaxed);
+        shared
+            .testers
+            .lock()
+            .expect("testers lock")
+            .push((id, steps));
+        Tester { shared, id }
+    }
+}
+
+impl Drop for Tester<'_> {
+    fn drop(&mut self) {
+        self.shared
+            .testers
+            .lock()
+            .expect("testers lock")
+            .retain(|(id, _)| *id != self.id);
+        // Its waiting steps end now: dropping their senders.
+        self.shared
+            .steps
+            .lock()
+            .expect("steps lock")
+            .retain(|_, (connection, _)| *connection != self.id);
+    }
+}
+
 async fn send(socket: &mut WebSocket, msg: &ServerMessage) -> Result<(), BoxError> {
     socket
         .send(Message::Text(serde_json::to_string(msg)?.into()))
@@ -581,6 +801,7 @@ async fn send_event(
     event: &Event,
 ) -> Result<(), BoxError> {
     match event {
+        Event::Root => send(socket, &ServerMessage::Root).await,
         Event::Building => send(socket, &ServerMessage::Building).await,
         // It cannot run the last good build either: it keeps showing why.
         Event::Failed(_) if host.refused.is_some() => Ok(()),
@@ -644,6 +865,7 @@ async fn send_event(
             }
             host.refused = None;
             let format = host.format;
+            let limits = shared.limits.lock().expect("limits lock").clone();
             send(
                 socket,
                 &ServerMessage::Bundle {
@@ -651,6 +873,8 @@ async fn send_event(
                     format,
                     source_map: bundle.source_map.is_some(),
                     capabilities: bundle.capabilities.clone(),
+                    app_id: bundle.app_id.clone(),
+                    limits,
                 },
             )
             .await?;

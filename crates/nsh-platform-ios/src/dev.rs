@@ -8,7 +8,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -17,7 +17,7 @@ use nsh_dev::{
     DevClient, DevEvent, HostInfo,
     protocol::{BundleFormat, HostPlatform},
 };
-use nsh_engine::{BYTECODE_VERSION, Bundle, Policy};
+use nsh_engine::{App, BYTECODE_VERSION, Bundle, Limits, Policy};
 use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, rc::Retained, sel,
 };
@@ -79,6 +79,9 @@ pub fn init_logging() {
     }
 }
 
+/// Names the sessions' views to their test agents.
+static NEXT_KEY: AtomicU64 = AtomicU64::new(1);
+
 /// A connection to a dev server, loading its bundles into one view.
 pub(crate) struct DevSession {
     /// Keeps the client (and its thread) alive.
@@ -93,6 +96,23 @@ impl DevSession {
         let mtm = container.mtm();
         let ui = Rc::new(RefCell::new(DevUi::default()));
         show_status(&ui, &container, &format!("Connecting to {url}…"));
+        // A test session (`nsh test --target ios`): the view keeps the
+        // model the agent's steps see, from the first bundle on (the main
+        // queue is serial, so it comes before the bundle).
+        let key = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
+        crate::agent::register(key, view.clone());
+        let tested = Arc::new(MainThreadBound::new(view.clone(), mtm));
+        let tester = nsh_testing::agent::Tester::new(move |model| {
+            let tested = tested.clone();
+            DispatchQueue::main().exec_async(move || {
+                let mtm = MainThreadMarker::new().expect("main queue");
+                if let Some(view) = tested.get(mtm).upgrade() {
+                    view.set_test_model(model);
+                }
+            });
+            Box::new(crate::agent::IosNative::new(key))
+        });
+        let tests = tester.clone();
         let target = MainThreadBound::new((view, ui.clone()), mtm);
         let target = Arc::new(target);
         let host = HostInfo {
@@ -109,8 +129,13 @@ impl DevSession {
                 .iter()
                 .filter_map(|set| set.specifier().map(str::to_owned))
                 .collect(),
+            tests: true,
         };
         let started = DevClient::start(url, host, move |event| {
+            // Taken off the main queue: a step waits for what it does there.
+            let Some(event) = tests.event(event) else {
+                return;
+            };
             match event {
                 DevEvent::Connected => CONNECTED.store(true, Ordering::Relaxed),
                 DevEvent::Disconnected => CONNECTED.store(false, Ordering::Relaxed),
@@ -128,6 +153,7 @@ impl DevSession {
         match started {
             Ok(client) => {
                 let client = Arc::new(client);
+                tester.set_client(&client);
                 *CLIENT.lock().unwrap_or_else(|e| e.into_inner()) = Arc::downgrade(&client);
                 Some(DevSession {
                     _client: client,
@@ -224,6 +250,30 @@ fn handle(view: &Rc<Inner>, ui: &Rc<RefCell<DevUi>>, event: DevEvent) {
         DevEvent::Disconnected => {
             show_status(ui, container, "Dev server disconnected — reconnecting…")
         }
+        // The client's thread hands them to the test agent.
+        DevEvent::Testing
+        | DevEvent::Step { .. }
+        | DevEvent::TestSetup { .. }
+        | DevEvent::Fetch { .. } => {}
+        DevEvent::Root => {
+            hide_status(ui);
+            let Some(root) = crate::root() else {
+                return show_error(
+                    ui,
+                    container,
+                    "This host cannot run the app",
+                    "The app is of Rust only, and this host was not built with its root.",
+                    true,
+                );
+            };
+            {
+                let mut ui = ui.borrow_mut();
+                ui.latest = None;
+                ui.running = None;
+            }
+            hide_error(ui);
+            Inner::load(view, App::Rust(root));
+        }
         DevEvent::Building => {}
         DevEvent::BuildFailed(message) => {
             show_error(ui, container, "Build failed", &message, false)
@@ -245,6 +295,8 @@ fn handle(view: &Rc<Inner>, ui: &Rc<RefCell<DevUi>>, event: DevEvent) {
             bytes,
             source_map,
             capabilities,
+            app_id,
+            limits,
         } => {
             let mut bundle = match format {
                 // SAFETY: compiled for this runtime's bytecode version (the
@@ -268,9 +320,14 @@ fn handle(view: &Rc<Inner>, ui: &Rc<RefCell<DevUi>>, event: DevEvent) {
             if let Some(map) = source_map {
                 bundle = bundle.with_source_map(map);
             }
+            bundle = bundle.with_app_id(app_id.as_deref());
             bundle = match bundle.with_capabilities_json(capabilities.as_deref()) {
                 Ok(bundle) => bundle,
                 Err(err) => return show_error(ui, container, "Invalid capabilities", &err, true),
+            };
+            let limits = match Limits::development(limits.as_deref()) {
+                Ok(limits) => limits,
+                Err(err) => return show_error(ui, container, "Invalid limits", &err, true),
             };
             hide_status(ui);
             let running = {
@@ -284,6 +341,7 @@ fn handle(view: &Rc<Inner>, ui: &Rc<RefCell<DevUi>>, event: DevEvent) {
             }
             log::info!("loading build {version}");
             hide_error(ui);
+            view.set_limits(limits);
             Inner::load(view, bundle.into());
         }
         DevEvent::Patch {

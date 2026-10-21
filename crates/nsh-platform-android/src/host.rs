@@ -17,10 +17,13 @@ use jni::{
     signature::{Primitive, ReturnType},
     sys::{jboolean, jfloat, jfloatArray, jint, jlong},
 };
-use nsh_core::{EventKind, EventPayload, MountBatch, MountItem, NodeId, PayloadValue, Size};
+use nsh_core::{
+    EventKind, EventPayload, MountBatch, MountItem, NodeId, PayloadValue, Points, Size,
+    geometry::{DevicePixels, point, px, size},
+};
 use nsh_engine::{
-    App, Assets, Bundle, ColorScheme, Engine, EngineConfig, EngineControl, Environment, Idiom,
-    Insets, Locale, MountSink, Policy, Root,
+    App, Assets, Bundle, ColorScheme, Edges, Engine, EngineConfig, EngineControl, Environment,
+    Idiom, Locale, MountSink, Policy, Root,
 };
 
 use crate::{
@@ -36,9 +39,12 @@ pub(crate) struct Host {
     density: f32,
     trace: bool,
     engine: Mutex<Option<Engine>>,
+    /// The running engine's control, for answers the sink gives itself
+    /// (never locked while an engine stops, unlike `engine`).
+    answers: Mutex<Option<EngineControl>>,
     /// The app, waiting for the first non-empty size.
     pending: Mutex<Option<App>>,
-    viewport: Mutex<Size>,
+    viewport: Mutex<Size<Points>>,
     environment: Mutex<Environment>,
     /// Animation items of submitted batches, by batch number, applied on the
     /// UI thread once Java has applied that batch.
@@ -51,15 +57,42 @@ pub(crate) struct Host {
     granted: Mutex<Option<nsh_engine::Capabilities>>,
     /// The VM limits of loaded apps (`NshView.setLimits`).
     limits: Mutex<nsh_engine::Limits>,
+    /// Where loaded apps keep their data, each in a directory named by its
+    /// id ([`EngineConfig::data_dir`]): `nsh` in the files directory.
+    data_dir: Option<std::path::PathBuf>,
+    /// The directory loaded apps keep their storage in, overriding their own
+    /// (`NshView.setStorageDirectory`); `None`: theirs.
+    storage: Mutex<Option<std::path::PathBuf>>,
     /// What the running app may reach (web view navigations check it).
     access: Mutex<Arc<nsh_engine::Access>>,
     #[cfg(feature = "dev")]
     pub(crate) dev: Mutex<Option<crate::dev::DevSession>>,
+    /// A test session's model of the app (`nsh test --target android`):
+    /// every batch and error goes to it.
+    #[cfg(feature = "dev")]
+    pub(crate) test_model: Mutex<Option<Arc<nsh_testing::agent::Model>>>,
 }
 
 impl Host {
+    /// The display's density: pixels per point.
+    #[cfg(feature = "dev")]
+    pub(crate) fn density(&self) -> f32 {
+        self.density
+    }
+
+    /// Whether the native animation graph animates.
+    #[cfg(feature = "dev")]
+    pub(crate) fn animating(&self) -> bool {
+        self.ui.lock().is_ok_and(|ui| ui.animating())
+    }
+
     fn control(&self) -> Option<EngineControl> {
         self.engine.lock().ok()?.as_ref().map(Engine::control)
+    }
+
+    /// The VM limits of the apps loaded from now on.
+    pub(crate) fn set_limits(&self, limits: nsh_engine::Limits) {
+        *self.limits.lock().expect("limits") = limits;
     }
 
     /// Runs `app`, replacing the running app.
@@ -77,31 +110,48 @@ impl Host {
         };
         *self.access.lock().expect("access") = Arc::new(access);
         let viewport = *self.viewport.lock().expect("viewport");
-        if viewport.width <= 0.0 || viewport.height <= 0.0 {
+        if viewport.width <= px(0.0) || viewport.height <= px(0.0) {
             *self.pending.lock().expect("pending") = Some(app);
             return;
         }
         // Stop the old engine first: its batches must not reach the new app.
+        *self.answers.lock().expect("answers") = None;
         drop(self.engine.lock().expect("engine").take());
         *self.animation_queue.lock().expect("queue") = VecDeque::new();
         *self.ui.lock().expect("ui") = UiAnimation::default();
-        let config = EngineConfig {
+        #[allow(unused_mut)]
+        let mut config = EngineConfig {
             app,
             viewport,
             trace: self.trace,
             network: Some(crate::net::network()),
+            websocket: None,
+            filesystem: None,
             assets: Some(Arc::new(ViewAssets(self.clone()))),
             environment: *self.environment.lock().expect("environment"),
             // Android's toolbar is 56dp; it has no large titles.
-            header_heights: (56.0, 56.0),
+            header_heights: (nsh_core::Points(56.0), nsh_core::Points(56.0)),
             limits: *self.limits.lock().expect("limits"),
             ui_sets: crate::ui_sets(),
             runtime: None,
+            data_dir: self.data_dir.clone(),
+            storage: self.storage.lock().expect("storage").as_ref().map(|dir| {
+                nsh_engine::FileStorage::open(dir) as Arc<dyn nsh_engine::StorageBackend>
+            }),
+            clock: Default::default(),
         };
         let density = self.density;
         let sink = Sink(self.clone());
+        // A test session's app: the test's storage, network and trace.
+        #[cfg(feature = "dev")]
+        if let Some(model) = &*self.test_model.lock().unwrap_or_else(|e| e.into_inner()) {
+            model.set_up_engine(&mut config);
+        }
         match Engine::start(config, move || AndroidTextEngine { density }, sink) {
-            Ok(engine) => *self.engine.lock().expect("engine") = Some(engine),
+            Ok(engine) => {
+                *self.answers.lock().expect("answers") = Some(engine.control());
+                *self.engine.lock().expect("engine") = Some(engine);
+            }
             Err(err) => log::error!("failed to start the engine: {err}"),
         }
     }
@@ -186,6 +236,34 @@ impl Host {
     }
 }
 
+/// Answers the clipboard's image and file reads, which Android's
+/// clipboard holds as content URIs NSH does not read yet: no image, no
+/// files.
+fn answer_clipboard_reads(host: &Host, batch: &MountBatch) {
+    use nsh_core::{Command, platform::clipboard};
+    let reads = batch.items.iter().filter_map(|item| match item {
+        MountItem::Command {
+            command: Command::ReadClipboardImage { id, .. },
+            ..
+        } => Some(clipboard::image_answer(*id, false, None)),
+        MountItem::Command {
+            command: Command::ReadClipboardFiles { id },
+            ..
+        } => Some(clipboard::files_answer(*id, &[])),
+        _ => None,
+    });
+    let mut reads = reads.peekable();
+    if reads.peek().is_none() {
+        return;
+    }
+    let Some(control) = host.answers.lock().ok().and_then(|c| c.clone()) else {
+        return;
+    };
+    for payload in reads {
+        control.dispatch_event(nsh_core::ROOT_ID, EventKind::Clipboard, payload);
+    }
+}
+
 /// Hands commits to the UI thread: one `NshView.submit(bytes, objects, seq)`
 /// call per batch.
 struct Sink(Arc<Host>);
@@ -193,6 +271,11 @@ struct Sink(Arc<Host>);
 impl MountSink for Sink {
     fn submit(&self, batch: MountBatch) {
         let host = &self.0;
+        #[cfg(feature = "dev")]
+        if let Some(model) = &*host.test_model.lock().unwrap_or_else(|e| e.into_inner()) {
+            model.apply(&batch);
+        }
+        answer_clipboard_reads(host, &batch);
         let encoded = encode::encode(batch);
         let seq = host.seq.fetch_add(1, Ordering::Relaxed) + 1;
         if !encoded.animation.is_empty() {
@@ -261,6 +344,10 @@ impl MountSink for Sink {
 
     fn report_error(&self, message: &str) {
         #[cfg(feature = "dev")]
+        if let Some(model) = &*self.0.test_model.lock().unwrap_or_else(|e| e.into_inner()) {
+            model.error(message);
+        }
+        #[cfg(feature = "dev")]
         if let Some(dev) = self.0.dev.lock().ok().as_ref().and_then(|d| d.as_ref()) {
             dev.show_error(&self.0, "Uncaught error", message);
         }
@@ -307,22 +394,28 @@ pub(crate) unsafe fn host<'a>(handle: jlong) -> &'a Arc<Host> {
 
 #[unsafe(no_mangle)]
 extern "system" fn Java_com_longbridge_nsh_Native_create(
-    env: JNIEnv<'_>,
+    mut env: JNIEnv<'_>,
     _: JClass<'_>,
     view: JObject<'_>,
     density: jfloat,
     trace: jboolean,
+    data_dir: JString<'_>,
 ) -> jlong {
     let Ok(view) = env.new_global_ref(view) else {
         return 0;
     };
+    let data_dir = env
+        .get_string(&data_dir)
+        .ok()
+        .map(|dir| std::path::PathBuf::from(String::from(dir)));
     let host = Arc::new(Host {
         view,
         density,
         trace: trace != 0,
         engine: Mutex::new(None),
+        answers: Mutex::new(None),
         pending: Mutex::new(None),
-        viewport: Mutex::new(Size::new(0.0, 0.0)),
+        viewport: Mutex::new(Size::new(px(0.0), px(0.0))),
         environment: Mutex::new(Environment::default()),
         animation_queue: Mutex::new(VecDeque::new()),
         seq: AtomicU64::new(0),
@@ -330,9 +423,13 @@ extern "system" fn Java_com_longbridge_nsh_Native_create(
         epoch: Instant::now(),
         granted: Mutex::new(None),
         limits: Mutex::new(nsh_engine::Limits::default()),
+        data_dir,
+        storage: Mutex::new(None),
         access: Mutex::new(Arc::default()),
         #[cfg(feature = "dev")]
         dev: Mutex::new(None),
+        #[cfg(feature = "dev")]
+        test_model: Mutex::new(None),
     });
     Box::into_raw(Box::new(host)) as jlong
 }
@@ -383,24 +480,51 @@ extern "system" fn Java_com_longbridge_nsh_Native_setLimits(
 ) {
     // SAFETY: Java passes its live handle.
     let host = unsafe { host(handle) };
-    let mut limits = nsh_engine::Limits::default();
-    let pick = |v: jint| (v > 0).then_some(v as usize);
-    if let Some(mb) = pick(memory_mb) {
-        limits.memory_bytes = mb << 20;
-    }
-    if let Some(kb) = pick(stack_kb) {
-        limits.stack_bytes = (kb << 10).min(limits.stack_bytes);
-    }
-    if let Some(ms) = pick(load_ms) {
-        limits.load_budget = std::time::Duration::from_millis(ms as u64);
-    }
-    if let Some(ms) = pick(call_ms) {
-        limits.call_budget = std::time::Duration::from_millis(ms as u64);
-    }
-    if let Some(n) = pick(max_nodes) {
-        limits.max_nodes = n;
-    }
-    *host.limits.lock().expect("limits") = limits;
+    let set = |v: jint| (v > 0).then_some(v as usize);
+    let ms = |v: jint| set(v).map(|ms| std::time::Duration::from_millis(ms as u64));
+    let limits = nsh_engine::HostLimits {
+        memory_bytes: set(memory_mb).map(|mb| mb << 20),
+        stack_bytes: set(stack_kb).map(|kb| kb << 10),
+        load_budget: ms(load_ms),
+        call_budget: ms(call_ms),
+        max_nodes: set(max_nodes),
+    };
+    host.set_limits(limits.limits());
+}
+
+/// The apps loaded next run on their own, without limits (the standalone
+/// app's activities: `NshView.useStandaloneLimits`).
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_longbridge_nsh_Native_setStandaloneLimits(
+    _: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+) {
+    // SAFETY: Java passes its live handle.
+    let host = unsafe { host(handle) };
+    host.set_limits(nsh_engine::Limits::standalone());
+}
+
+/// The directory the storage of the apps loaded next is kept in (null: each
+/// app's own in the data directory).
+#[unsafe(no_mangle)]
+extern "system" fn Java_com_longbridge_nsh_Native_setStorage(
+    mut env: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+    dir: JString<'_>,
+) {
+    // SAFETY: Java passes its live handle.
+    let host = unsafe { host(handle) };
+    let dir = if dir.is_null() {
+        None
+    } else {
+        match env.get_string(&dir) {
+            Ok(dir) => Some(std::path::PathBuf::from(String::from(dir))),
+            Err(err) => return log::error!("invalid storage directory: {err}"),
+        }
+    };
+    *host.storage.lock().expect("storage") = dir;
 }
 
 /// Whether the running app's web views may navigate to `url`.
@@ -457,6 +581,7 @@ extern "system" fn Java_com_longbridge_nsh_Native_destroy(
     let host = unsafe { Box::from_raw(handle as *mut Arc<Host>) };
     #[cfg(feature = "dev")]
     drop(host.dev.lock().expect("dev").take());
+    *host.answers.lock().expect("answers") = None;
     drop(host.engine.lock().expect("engine").take());
 }
 
@@ -469,6 +594,7 @@ extern "system" fn Java_com_longbridge_nsh_Native_load(
     bytecode: jboolean,
     source_map: JString<'_>,
     capabilities: JString<'_>,
+    app: JString<'_>,
 ) {
     // SAFETY: Java passes its live handle.
     let host = unsafe { host(handle) };
@@ -492,6 +618,14 @@ extern "system" fn Java_com_longbridge_nsh_Native_load(
     } else {
         env.get_string(&capabilities).ok().map(String::from)
     };
+    // `app.json` next to the bundle (`nsh package`): the app's id.
+    if !app.is_null()
+        && let Ok(app) = env.get_string(&app)
+    {
+        let app = serde_json::from_str::<serde_json::Value>(&String::from(app)).ok();
+        let id = app.as_ref().and_then(|app| app.get("id")?.as_str());
+        bundle = bundle.with_app_id(id);
+    }
     match bundle.with_capabilities_json(declared.as_deref()) {
         Ok(bundle) => host.load(bundle),
         Err(err) => log::error!("cannot load the bundle: {err}"),
@@ -543,9 +677,9 @@ extern "system" fn Java_com_longbridge_nsh_Native_resize(
 ) {
     // SAFETY: Java passes its live handle.
     let host = unsafe { host(handle) };
-    let size = Size::new(width, height);
+    let size = Size::new(Points(width), Points(height));
     *host.viewport.lock().expect("viewport") = size;
-    host.environment.lock().expect("environment").window = (width, height);
+    host.environment.lock().expect("environment").window = size;
     if let Some(control) = host.control() {
         control.resize(size);
         control.set_environment(*host.environment.lock().expect("environment"));
@@ -574,13 +708,13 @@ extern "system" fn Java_com_longbridge_nsh_Native_environment(
         return;
     }
     let mut environment = host.environment.lock().expect("environment");
-    environment.safe_area = Insets {
-        top: v[0],
-        right: v[1],
-        bottom: v[2],
-        left: v[3],
+    environment.safe_area = Edges {
+        top: Points(v[0]),
+        right: Points(v[1]),
+        bottom: Points(v[2]),
+        left: Points(v[3]),
     };
-    environment.keyboard_height = v[4];
+    environment.keyboard_height = Points(v[4]);
     environment.keyboard_duration = v[5];
     environment.font_scale = v[6];
     environment.rtl = v[7] != 0.0;
@@ -639,11 +773,11 @@ extern "system" fn Java_com_longbridge_nsh_Native_event(
         | EventKind::ScrollBeginDrag
         | EventKind::ScrollEndDrag
         | EventKind::MomentumScrollBegin
-        | EventKind::MomentumScrollEnd => EventPayload::Scroll { x, y },
-        EventKind::Load => EventPayload::Image {
-            width: x,
-            height: y,
-        },
+        | EventKind::MomentumScrollEnd => EventPayload::Scroll(point(px(x), px(y))),
+        // The bitmap's width and height: whole pixels.
+        EventKind::Load => {
+            EventPayload::Image(size(DevicePixels(x as i32), DevicePixels(y as i32)))
+        }
         EventKind::Error => EventPayload::Error {
             message: read_text(),
         },
@@ -665,6 +799,41 @@ extern "system" fn Java_com_longbridge_nsh_Native_event(
     };
     if let Some(control) = host.control() {
         control.dispatch_event(id as NodeId, kind, payload);
+    }
+}
+
+/// `onHoverMove` of view `id` (see `Native.hover`).
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+extern "system" fn Java_com_longbridge_nsh_Native_hover(
+    _: JNIEnv<'_>,
+    _: JClass<'_>,
+    handle: jlong,
+    id: jint,
+    x: jfloat,
+    y: jfloat,
+    page_x: jfloat,
+    page_y: jfloat,
+    modifiers: jint,
+) {
+    // SAFETY: Java passes its live handle.
+    let host = unsafe { host(handle) };
+    let event = nsh_core::HoverEvent {
+        location: point(px(x), px(y)),
+        page: point(px(page_x), px(page_y)),
+        modifiers: nsh_core::keymap::Modifiers {
+            ctrl: modifiers & 1 != 0,
+            alt: modifiers & 2 != 0,
+            shift: modifiers & 4 != 0,
+            cmd: modifiers & 8 != 0,
+        },
+    };
+    if let Some(control) = host.control() {
+        control.dispatch_event(
+            id as NodeId,
+            EventKind::HoverMove,
+            EventPayload::Hover(event),
+        );
     }
 }
 
@@ -726,10 +895,8 @@ extern "system" fn Java_com_longbridge_nsh_Native_touch(
                 id: ids[i] as u32,
                 target: targets[i] as NodeId,
                 path,
-                page_x: c[i * 4],
-                page_y: c[i * 4 + 1],
-                location_x: c[i * 4 + 2],
-                location_y: c[i * 4 + 3],
+                page: point(px(c[i * 4]), px(c[i * 4 + 1])),
+                location: point(px(c[i * 4 + 2]), px(c[i * 4 + 3])),
                 changed: flags[i] != 0,
             }
         })
@@ -834,6 +1001,8 @@ extern "system" fn Java_com_longbridge_nsh_Native_eventMap(
                 "error" => "error",
                 "text" => "text",
                 "has" => "has",
+                "reason" => "reason",
+                "composing" => "composing",
                 _ => continue,
             };
             if let Some(v) = read(&mut env, i) {
@@ -904,7 +1073,7 @@ extern "system" fn Java_com_longbridge_nsh_Native_scroll(
     // SAFETY: Java passes its live handle.
     let host = unsafe { host(handle) };
     if let Some(control) = host.control() {
-        control.scroll(id as NodeId, x, y, applied as u32);
+        control.scroll(id as NodeId, point(px(x), px(y)), applied as u32);
     }
     let mut ui = host.ui.lock().expect("ui");
     if !ui.scrolled(id as u32, x, y) {
@@ -969,12 +1138,11 @@ extern "system" fn Java_com_longbridge_nsh_Native_pan(
     }
     let (value_x, value_y) = ui.pan_values(id as u32);
     let payload = EventPayload::Pan {
-        translation_x: tx,
-        translation_y: ty,
+        translation: point(px(tx), px(ty)),
         velocity_x: vx,
         velocity_y: vy,
-        value_x,
-        value_y,
+        value_x: value_x.map(Points),
+        value_y: value_y.map(Points),
     };
     match (state, &control) {
         (0, Some(c)) => c.dispatch_event(id as NodeId, EventKind::PanStart, payload),
@@ -1052,12 +1220,12 @@ extern "system" fn Java_com_longbridge_nsh_Native_rootSize(
     if let Some(control) = host.control() {
         control.set_root_size(
             id as NodeId,
-            Size::new(width, height),
+            Size::new(Points(width), Points(height)),
             nsh_core::EdgeInsets {
-                top,
-                right,
-                bottom,
-                left,
+                top: px(top),
+                right: px(right),
+                bottom: px(bottom),
+                left: px(left),
             },
         );
     }
@@ -1166,6 +1334,6 @@ extern "system" fn Java_com_longbridge_nsh_Native_componentSize(
     // SAFETY: Java passes its live handle.
     let host = unsafe { host(handle) };
     if let Some(control) = host.control() {
-        control.set_component_size(id as NodeId, Size::new(width, height));
+        control.set_component_size(id as NodeId, Size::new(Points(width), Points(height)));
     }
 }

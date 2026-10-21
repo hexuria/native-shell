@@ -11,8 +11,14 @@
 //!   `NativeShellDev.xcframework`) into `dist/nsh/embed/ios`.
 //! - `web`: the WebAssembly runtime, its player and the website's demos
 //!   (`website/public/play` by default).
+//! - `api`: records the API apps use in `api/runtime.txt` and `api/types`
+//!   and shrinks `api/uncovered.txt`; `--keep <app>...` instead adds apps built by
+//!   this checkout (examples by name, other apps or `api/cases/<domain>`
+//!   by path) to the fixtures in `api/apps`, those whose build changed
+//!   (docs/dev/compatibility.md).
 
 mod android;
+mod api;
 mod dist;
 mod ios;
 mod run;
@@ -68,12 +74,23 @@ enum Task {
     /// Build the distribution in `dist/nsh`.
     Dist,
     /// Build only the iOS embedding XCFrameworks.
-    IosEmbed,
+    IosEmbed(ios::Options),
     /// Build the WebAssembly runtime and the website's demos.
     Web {
         /// Output directory.
         #[arg(long, default_value = "website/public/play")]
         out: std::path::PathBuf,
+    },
+    /// Record the API apps use in `api/runtime.txt` and `api/types`.
+    Api {
+        /// Instead of recording, keep these apps, as this checkout builds
+        /// them, in `api/apps/<app>-<version>` when the build differs from
+        /// the app's newest fixture (the JSX compiler's output changed, or a
+        /// new API's case); write their scripts, then record. A kept fixture
+        /// is never rewritten. An app is an example's name or the path of an
+        /// app's directory or entry module (`api/cases/<domain>`).
+        #[arg(long, value_name = "APP", num_args = 1..)]
+        keep: Vec<String>,
     },
 }
 
@@ -130,7 +147,8 @@ fn task(task: Task) -> anyhow::Result<()> {
         }
         Task::ClippyAndroid => android::clippy(),
         Task::Dist => dist::dist(),
-        Task::IosEmbed => ios::build().map(|out| term::note(out.display())),
+        Task::IosEmbed(options) => ios::build(options).map(|out| term::note(out.display())),
         Task::Web { out } => web::build(&out),
+        Task::Api { keep } => api::api(&keep),
     }
 }

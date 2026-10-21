@@ -25,26 +25,27 @@ mod ticket;
 
 use std::{cell::RefCell, f32::consts::TAU, rc::Rc, time::Duration};
 
+use nsh_base::nav_page;
 use nsh_core::{
     LayoutAnimation, LayoutCurve, LayoutProperty, LayoutTransition,
+    animation::{Curve, EaseMode},
     canvas::{CanvasGradient, Composite, LineCap, LineJoin},
-    nsh_animation::{Curve, EaseMode},
     time::Instant,
-    ui::{AccessibilityState, NativeNode, View, prelude::*},
+    ui::{AccessibilityState, AnimatedNode, View, prelude::*},
 };
 
 use self::{
-    detail::{StockView, StockViewProps},
+    detail::stock_view,
     market::{
         INDEX_BASE, ISSUES, Market, Quote, SECTORS, TICK_MS, grouped, price, signed, time, tone_of,
     },
-    parts::{Calm, MarketButton, SpringBar, SpringBarProps, spring_bar},
+    parts::{Calm, market_button, spring_bar},
 };
 use crate::{
     nav,
     ui::{
-        IconName, Segment, Segmented, SegmentedEvent, SegmentedProps, SegmentedSize, colors,
-        desktop, header, icon, motion, pane_width,
+        IconName, PageHeader, Segment, SegmentedSize, colors, desktop, header, icon, lengths,
+        motion, pane_width, pt, segmented, with_header,
     },
 };
 
@@ -165,12 +166,11 @@ fn open(live: &Live, index: usize) {
     nav::push(format!("stock:{code}"), move || {
         // The screen is outside the watchlist: it gets the market here.
         provide_context(live.clone());
-        header(screen().title(code))
-            .header_right(MarketButton::element(()))
-            .child(StockView::element(StockViewProps {
-                stock: index as u32,
-                ..StockViewProps::default()
-            }))
+        with_header(
+            header(nav_page().title(code)).header_right(market_button()),
+            || PageHeader::new(code).right(market_button()),
+        )
+        .child(stock_view().stock(index as u32))
     });
 }
 
@@ -251,25 +251,24 @@ pub(crate) fn Stocks() -> impl IntoElement {
     let shown = signal(0_usize);
     let stocks = {
         let live = live.clone();
-        Each::new(
+        each(
             move || rows.get(),
             |i: &usize| *i,
             move |i, at| {
                 let index = i.get_untracked();
                 let live = live.clone();
-                StockRow::element(StockRowProps {
-                    index: index as u32,
-                    first: Prop::bind(move || at.get() == 0),
-                    wide,
-                    active: Prop::bind(move || wide && shown.get() == index),
-                })
-                .on_event(move |_: &StockRowEvent| {
-                    if wide {
-                        shown.set(index);
-                    } else {
-                        open(&live, index);
-                    }
-                })
+                stock_row()
+                    .index(index as u32)
+                    .first(move || at.get() == 0)
+                    .wide(wide)
+                    .active(move || wide && shown.get() == index)
+                    .on_press(move || {
+                        if wide {
+                            shown.set(index);
+                        } else {
+                            open(&live, index);
+                        }
+                    })
             },
         )
     };
@@ -285,24 +284,22 @@ pub(crate) fn Stocks() -> impl IntoElement {
     let watchlist = view()
         .flex_1()
         .bg(colors::BACKGROUND)
-        .child(MarketStrip::element(()))
+        .child(market_strip())
         .child(
             view().px_4().pb(px(6.0)).child(
-                Segmented::element(SegmentedProps {
-                    options,
-                    selected: Prop::bind(move || filter.get() as u32),
-                    size: SegmentedSize::Small,
-                })
-                .on_event(move |e: &SegmentedEvent| {
-                    let SegmentedEvent::Change(i) = e;
-                    filter.set(*i as usize);
-                }),
+                segmented()
+                    .options(options)
+                    .selected(move || filter.get() as u32)
+                    .size(SegmentedSize::Small)
+                    .on_change(move |i: &u32| {
+                        filter.set(*i as usize);
+                    }),
             ),
         )
         .child(
             scroll()
                 .flex_1()
-                .child(view().child(stocks).child(If::new(
+                .child(view().child(stocks).child(when(
                     move || rows.with(Vec::is_empty),
                     || {
                         text("Nothing here right now")
@@ -342,13 +339,7 @@ pub(crate) fn Stocks() -> impl IntoElement {
         // A new stock view when another stock is shown.
         .child(view().flex_1().child(dynamic(move || {
             let stock = shown.get() as u32;
-            untracked(|| {
-                StockView::element(StockViewProps {
-                    stock,
-                    wide: true,
-                    split: split.into(),
-                })
-            })
+            untracked(|| stock_view().stock(stock).wide(true).split(split))
         })))
         .into_element()
 }
@@ -360,15 +351,12 @@ pub(crate) fn Stocks() -> impl IntoElement {
 fn MarketStrip() -> impl IntoElement {
     let live = live();
     let opened = signal(false);
-    let turn = native_value(0.0);
-    let toggle = {
-        let turn = turn.clone();
-        move |_: &()| {
-            animate_layout(RELAYOUT);
-            opened.update(|o| *o = !*o);
-            let to = if opened.get_untracked() { 1.0 } else { 0.0 };
-            let _ = turn.spring(to, motion::SETTLE);
-        }
+    let turn = animated_value(0.0);
+    let toggle = move |_: &()| {
+        animate_layout(RELAYOUT);
+        opened.update(|o| *o = !*o);
+        let to = if opened.get_untracked() { 1.0 } else { 0.0 };
+        let _ = turn.spring(to, motion::SETTLE);
     };
     let (composite, clock) = (live.composite, live.clock);
     let change = computed(move || (composite.get() - INDEX_BASE) / INDEX_BASE * 100.0);
@@ -420,7 +408,12 @@ fn MarketStrip() -> impl IntoElement {
                         .child(
                             view()
                                 .bind_rotate(&turn.interpolate(&[0.0, 1.0], &[90.0, -90.0]))
-                                .child(icon(IconName::Chevron, 12.0, colors::FAINT)),
+                                .child(
+                                    icon()
+                                        .name(IconName::Chevron)
+                                        .size(12.0)
+                                        .tint(colors::FAINT),
+                                ),
                         ),
                 )
                 .child(
@@ -429,9 +422,9 @@ fn MarketStrip() -> impl IntoElement {
                         .text_color(colors::FAINT)
                         .tabular_nums(),
                 )
-                .child(MarketButton::element(())),
+                .child(market_button()),
         )
-        .child(If::new(opened, move || breadth(&live)))
+        .child(when(opened, move || breadth(&live)))
 }
 
 /// Advancers vs decliners across the composite and the sectors' moves:
@@ -536,22 +529,36 @@ fn sector_bar(label: &'static str, change: Memo<f64>, scale: Memo<f64>) -> View 
                 .flex_1()
                 .flex_row()
                 .items_center()
-                .child(view().flex_1().child(SpringBar::element(SpringBarProps {
-                    from_right: true,
-                    radius: Some(2.0),
-                    ..spring_bar(
-                        move || if change.get() < 0.0 { share() } else { 0.0 },
-                        colors::DOWN,
-                    )
-                })))
+                .child(
+                    view().flex_1().child(
+                        spring_bar()
+                            .share(move || {
+                                if change.get() < 0.0 {
+                                    share() as f32
+                                } else {
+                                    0.0
+                                }
+                            })
+                            .color(colors::DOWN)
+                            .from_right(true)
+                            .radius(2.0),
+                    ),
+                )
                 .child(view().w(px(1.0)).h(px(14.0)).bg(colors::BORDER))
-                .child(view().flex_1().child(SpringBar::element(SpringBarProps {
-                    radius: Some(2.0),
-                    ..spring_bar(
-                        move || if change.get() > 0.0 { share() } else { 0.0 },
-                        colors::UP,
-                    )
-                }))),
+                .child(
+                    view().flex_1().child(
+                        spring_bar()
+                            .share(move || {
+                                if change.get() > 0.0 {
+                                    share() as f32
+                                } else {
+                                    0.0
+                                }
+                            })
+                            .color(colors::UP)
+                            .radius(2.0),
+                    ),
+                ),
         )
         .child(
             text(move || format!("{}%", signed(change.get(), 2)))
@@ -574,10 +581,11 @@ const PULSE_GAP: Duration = Duration::from_millis(600);
 
 /// The newest point's pulse as a sparkline draws it: the ring's radius,
 /// the halo's and the ring's alpha (native: they move without a drawing).
+#[derive(Clone, Copy)]
 struct Ring {
-    radius: NativeNode,
-    halo: NativeNode,
-    stroke: NativeNode,
+    radius: AnimatedNode,
+    halo: AnimatedNode,
+    stroke: AnimatedNode,
 }
 
 /// Today in 104 × 38 pt: a smooth line through a moving average of the
@@ -602,8 +610,8 @@ fn sparkline(ys: &[f64], q: Quote, (lo, hi): (f64, f64), ring: &Ring) -> Painter
         let mut p = p.move_to(x_of(0), y_of(ys[0]));
         for k in 1..n.saturating_sub(1) {
             p = p.quadratic_curve_to(
-                (x_of(k), y_of(ys[k])),
-                (
+                pt(x_of(k), y_of(ys[k])),
+                pt(
                     (x_of(k) + x_of(k + 1)) / 2.0,
                     (y_of(ys[k]) + y_of(ys[k + 1])) / 2.0,
                 ),
@@ -614,9 +622,9 @@ fn sparkline(ys: &[f64], q: Quote, (lo, hi): (f64, f64), ring: &Ring) -> Painter
 
     // The fill: down from the line's top, strictly under the curve...
     let top = ys.iter().fold(bottom, |t, &v| t.min(y_of(v)));
-    let fill = CanvasGradient::linear(0.0, top, 0.0, bottom)
-        .add_color_stop(0.0, color(tone.opacity(0.22)))
-        .add_color_stop(1.0, color(tone.opacity(0.0)));
+    let fill = CanvasGradient::linear(pt(0.0, top), pt(0.0, bottom))
+        .add_color_stop(percentage(0.0), color(tone.opacity(0.22)))
+        .add_color_stop(percentage(1.0), color(tone.opacity(0.0)));
     let p = curve(Painter::new().begin_path())
         .line_to(x_of(n - 1), bottom)
         .line_to(x_of(0), bottom)
@@ -625,9 +633,9 @@ fn sparkline(ys: &[f64], q: Quote, (lo, hi): (f64, f64), ring: &Ring) -> Painter
         .fill();
     // ...and faded in over the first fifth (erased, not overdrawn).
     let fade_to = left + (right - left) * 0.2;
-    let fade = CanvasGradient::linear(left, 0.0, fade_to, 0.0)
-        .add_color_stop(0.0, rgb(0x000000))
-        .add_color_stop(1.0, Color(0));
+    let fade = CanvasGradient::linear(pt(left, 0.0), pt(fade_to, 0.0))
+        .add_color_stop(percentage(0.0), rgb(0x000000))
+        .add_color_stop(percentage(1.0), transparent_black());
     let p = p
         .composite(Composite::DestinationOut)
         .fill_style(fade)
@@ -638,7 +646,7 @@ fn sparkline(ys: &[f64], q: Quote, (lo, hi): (f64, f64), ring: &Ring) -> Painter
     let p = p
         .stroke_color(color(colors::MUTED.opacity(0.4)))
         .line_width(1.0)
-        .line_dash(&[1.0, 3.0])
+        .line_dash(&lengths([1.0, 3.0]))
         .begin_path()
         .move_to(left, y_of(q.prev_close))
         .line_to(right, y_of(q.prev_close))
@@ -729,9 +737,8 @@ fn StockRow(props: StockRowProps, cx: Scope<StockRowEvent>) -> impl IntoElement 
     };
     // The newest point's pulse: 0 → 1 on a change, at most every 600 ms so
     // each one plays out.
-    let ring = native_value(1.0);
+    let ring = animated_value(1.0);
     {
-        let ring = ring.clone();
         let seen = stored(quote.get_untracked().changed_at);
         let fired = stored(None::<Instant>);
         effect(move || {
@@ -746,11 +753,11 @@ fn StockRow(props: StockRowProps, cx: Scope<StockRowEvent>) -> impl IntoElement 
             }
         });
     }
-    let ring = Rc::new(Ring {
+    let ring = Ring {
         radius: ring.interpolate(&[0.0, 1.0], &[3.0, RING]),
         halo: ring.interpolate(&[0.0, 1.0], &[0.35, 0.0]),
         stroke: ring.interpolate(&[0.0, 1.0], &[0.9, 0.0]),
-    });
+    };
     let change = computed(move || quote.get().percent());
     let market = live.market;
     let active = props.active;
@@ -763,9 +770,9 @@ fn StockRow(props: StockRowProps, cx: Scope<StockRowEvent>) -> impl IntoElement 
         .items_center()
         .gap_3()
         .px_4()
-        .on_press(move |_: &()| cx.emit(StockRowEvent::Press))
+        .on_press(move || cx.emit(StockRowEvent::Press))
         // Pressed, the row shows the surface under its content.
-        .underlay(|| color(colors::SURFACE), 0.85)
+        .active(|s| s.bg(colors::SURFACE))
         .role(AccessibilityRole::Button)
         .label(name)
         .when(props.wide, |v| {
@@ -777,7 +784,7 @@ fn StockRow(props: StockRowProps, cx: Scope<StockRowEvent>) -> impl IntoElement 
                 .style_when(active, |s| s.bg(fill))
                 .hover(|s| s.bg(move || if active.get() { fill } else { colors::SURFACE }))
         })
-        .child(If::new(active, || {
+        .child(when(active, || {
             view()
                 .absolute()
                 .top(px(14.0))

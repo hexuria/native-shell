@@ -3,14 +3,15 @@
 //! Those with content take it with `.child(..)` / `.children(..)`; those
 //! with a root to place (a card in a row) take [`Styled`] methods for it.
 
-use nsh_core::ui::{Screen, StyleRefinement, prelude::*};
+use nsh_base::nav_page;
+use nsh_core::ui::{AnyElement, Os, Screen, StyleRefinement, prelude::*};
 
 /// A text a builder shows: a value, a signal or a closure.
 type Label = Reactive<SharedString>;
 
 use super::{
-    animated::{PressProps, press_with},
-    icons::{IconName, icon},
+    animated::press,
+    icons::{IconName, Tint, icon},
     theme::{Finish, Finished, MONO, Tone, colors, radius},
 };
 
@@ -55,10 +56,167 @@ macro_rules! content {
 /// background, the text color for the title, the accent for the back
 /// button, following the appearance.
 pub(crate) fn header(screen: Screen) -> Screen {
-    screen
-        .header_background_color(|| color(colors::BACKGROUND))
-        .header_title_color(|| color(colors::TEXT))
-        .header_tint_color(|| color(colors::ACCENT))
+    screen.header_style_with(|s| {
+        s.bg(colors::BACKGROUND)
+            .text_color(colors::TEXT)
+            .tint_color(colors::ACCENT)
+    })
+}
+
+/// Whether the app draws its pages' headers ([`PageHeader`]): on the
+/// desktops and the web; iOS and Android show the system's.
+pub(crate) fn draws_header() -> bool {
+    !matches!(os(), Os::Ios | Os::Android)
+}
+
+/// A pushed screen with the gallery's header: `title` in the system's
+/// header on phones, a [`PageHeader`] with a back button where the app
+/// draws it.
+pub(crate) fn titled(title: impl Into<SharedString>) -> Screen {
+    let title = title.into();
+    with_header(header(nav_page().title(title.clone())), || {
+        PageHeader::new(title)
+    })
+}
+
+/// `screen` with the header `make` makes where the app draws headers
+/// ([`draws_header`]); the system's header elsewhere.
+pub(crate) fn with_header(screen: Screen, make: impl FnOnce() -> PageHeader) -> Screen {
+    if draws_header() {
+        screen.header(make())
+    } else {
+        screen
+    }
+}
+
+/// A page's header where the app draws it (TS `PageHeader`): a back
+/// button (popping the gallery's stack), the title, and items on either
+/// side, on the page's background over a hairline.
+pub(crate) struct PageHeader {
+    title: Option<Label>,
+    title_element: Option<AnyElement>,
+    back: bool,
+    left: Option<AnyElement>,
+    right: Option<AnyElement>,
+    tint: AdaptiveColor,
+    text_color: AdaptiveColor,
+    transparent: bool,
+    background: AdaptiveColor,
+    root: View,
+}
+
+impl PageHeader {
+    /// A header titled `title`, with a back button.
+    pub(crate) fn new(title: impl IntoReactive<SharedString>) -> Self {
+        Self {
+            title: Some(title.into_reactive()),
+            title_element: None,
+            back: true,
+            left: None,
+            right: None,
+            tint: colors::ACCENT,
+            text_color: colors::TEXT,
+            transparent: false,
+            background: colors::BACKGROUND,
+            root: view(),
+        }
+    }
+
+    /// Whether it has a back button (default true).
+    pub(crate) fn back(mut self, back: bool) -> Self {
+        self.back = back;
+        self
+    }
+
+    /// An element in place of the title.
+    pub(crate) fn title_element(mut self, title: impl IntoElement) -> Self {
+        self.title_element = Some(title.into_element());
+        self
+    }
+
+    /// An element left of the title (after the back button).
+    pub(crate) fn left(mut self, item: impl IntoElement) -> Self {
+        self.left = Some(item.into_element());
+        self
+    }
+
+    /// An element right of the title.
+    pub(crate) fn right(mut self, item: impl IntoElement) -> Self {
+        self.right = Some(item.into_element());
+        self
+    }
+
+    /// The colors of the title and of the back button.
+    pub(crate) fn colors(mut self, text_color: AdaptiveColor, tint: AdaptiveColor) -> Self {
+        self.text_color = text_color;
+        self.tint = tint;
+        self
+    }
+
+    /// Its background (default: the page's).
+    pub(crate) fn background(mut self, background: AdaptiveColor) -> Self {
+        self.background = background;
+        self
+    }
+
+    /// No background and no hairline: the content shows under it.
+    pub(crate) fn transparent(mut self) -> Self {
+        self.transparent = true;
+        self
+    }
+}
+
+styled_root!(PageHeader);
+
+impl IntoElement for PageHeader {
+    fn into_element(self) -> AnyElement {
+        let tint = self.tint;
+        let back = self.back.then(|| {
+            view()
+                .size(px(32.0))
+                .rounded(px(radius::CONTROL))
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .role(AccessibilityRole::Button)
+                .label("Back")
+                .hover(|s| s.bg(colors::RAISED))
+                .active(|s| s.opacity(0.6))
+                .on_press(crate::nav::pop)
+                .child(
+                    view()
+                        .rotate(deg(180.0))
+                        .child(icon().name(IconName::Chevron).size(18.0).tint(tint)),
+                )
+        });
+        let title = match (self.title_element, self.title) {
+            (Some(element), _) => view().flex_1().flex_row().child(element).into_element(),
+            (None, Some(title)) => text(title)
+                .flex_1()
+                .number_of_lines(1)
+                .text_size(px(17.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(self.text_color)
+                .into_element(),
+            (None, None) => view().flex_1().into_element(),
+        };
+        self.root
+            .h(px(52.0))
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .px_3()
+            .when(!self.transparent, |v| {
+                v.bg(self.background)
+                    .border_b_1()
+                    .border_b_color(colors::LINE)
+            })
+            .children(back)
+            .children(self.left)
+            .child(title)
+            .children(self.right)
+            .into_element()
+    }
 }
 
 /// A rounded icon tile.
@@ -106,7 +264,12 @@ impl IntoElement for IconTile {
             .finish(Finish::Raised)
             .items_center()
             .justify_center()
-            .child(icon(self.name, size * 0.5, self.tint))
+            .child(
+                icon()
+                    .name(self.name)
+                    .size(size * 0.5)
+                    .tint(self.tint.map(Tint::from)),
+            )
             .into_element()
     }
 }
@@ -403,7 +566,7 @@ impl IntoElement for Figure {
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(colors::TEXT)
             .tabular_nums()
-            .letter_spacing(-0.5)
+            .letter_spacing(px(-0.5))
             .children(self.unit.map(|unit| {
                 text(unit.map(|unit| SharedString::from(format!(" {unit}"))))
                     .text_size(px(17.0))
@@ -754,40 +917,38 @@ impl IntoElement for Button {
         let fg = look.clone().map(|l| l.fg);
         // The root (the press target) takes the caller's styles: `flex_1`
         // shares a row.
-        press_with(
-            PressProps {
-                disabled: self.disabled,
-                label: Prop::from(self.label.clone().map(Some)),
-                ..PressProps::default()
-            },
-            self.on_press,
-        )
-        .map(|p| apply_root(p, self.root))
-        .child(
-            button_surface(
-                view()
-                    .h(px(44.0))
-                    .px(px(18.0))
-                    .rounded(px(radius::CONTROL))
-                    .border_curve(BorderCurve::Continuous)
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .gap_2(),
-                &look,
-            )
-            .children(
-                self.icon
-                    .map(|name| icon(Prop::from(name), 16.0, fg.clone())),
-            )
+        press()
+            .disabled(self.disabled)
+            .label(Prop::from(self.label.clone().map(Some)))
+            .on_press(self.on_press)
+            .map(|p| apply_root(p, self.root))
             .child(
-                text(self.label)
-                    .text_size(px(15.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(fg),
-            ),
-        )
-        .into_element()
+                button_surface(
+                    view()
+                        .h(px(44.0))
+                        .px(px(18.0))
+                        .rounded(px(radius::CONTROL))
+                        .border_curve(BorderCurve::Continuous)
+                        .flex_row()
+                        .items_center()
+                        .justify_center()
+                        .gap_2(),
+                    &look,
+                )
+                .children(self.icon.map(|name| {
+                    icon()
+                        .name(name)
+                        .size(16.0)
+                        .tint(fg.clone().map(Tint::from))
+                }))
+                .child(
+                    text(self.label)
+                        .text_size(px(15.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(fg),
+                ),
+            )
+            .into_element()
     }
 }
 
@@ -833,40 +994,37 @@ impl IntoElement for RoundButton {
     fn into_element(self) -> AnyElement {
         let size = self.size;
         let primary = !self.secondary;
-        press_with(
-            PressProps {
-                scale: 0.92.into(),
-                disabled: self.disabled.into(),
-                label: Prop::from(self.label.map(Some)),
-                ..PressProps::default()
-            },
-            self.on_press,
-        )
-        .map(|p| apply_root(p, self.root))
-        .child(
-            view()
-                .size(px(size))
-                .rounded(px(size / 2.0))
-                .items_center()
-                .justify_center()
-                .map(|v| {
-                    if primary {
-                        v.bg(colors::LIGHT).finish(Finish::Light)
-                    } else {
-                        v.bg(colors::RAISED).finish(Finish::Pill).border_1()
-                    }
-                })
-                .child(icon(
-                    Prop::from(self.icon),
-                    size * 0.42,
-                    if primary {
-                        colors::ON_LIGHT
-                    } else {
-                        colors::TEXT
-                    },
-                )),
-        )
-        .into_element()
+        press()
+            .scale(0.92)
+            .disabled(self.disabled)
+            .label(Prop::from(self.label.map(Some)))
+            .on_press(self.on_press)
+            .map(|p| apply_root(p, self.root))
+            .child(
+                view()
+                    .size(px(size))
+                    .rounded(px(size / 2.0))
+                    .items_center()
+                    .justify_center()
+                    .map(|v| {
+                        if primary {
+                            v.bg(colors::LIGHT).finish(Finish::Light)
+                        } else {
+                            v.bg(colors::RAISED).finish(Finish::Pill).border_1()
+                        }
+                    })
+                    .child(
+                        icon()
+                            .name(Prop::from(self.icon))
+                            .size(size * 0.42)
+                            .tint(if primary {
+                                colors::ON_LIGHT
+                            } else {
+                                colors::TEXT
+                            }),
+                    ),
+            )
+            .into_element()
     }
 }
 
@@ -915,7 +1073,9 @@ impl IntoElement for Meter {
             .bg(colors::RAISED)
             .child(
                 view()
-                    .w(self.value.map(|v| relative(v.clamp(0.0, 1.0))))
+                    .w(self
+                        .value
+                        .map(|v| Length::from(relative(v.clamp(0.0, 1.0)))))
                     .h(px(6.0))
                     .rounded(px(3.0))
                     .bg(self.tone.map(Tone::color)),

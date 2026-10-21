@@ -1,5 +1,5 @@
 import { effect, type GestureResponderEvent, type JSX, signal, Text, View, type YNode } from "nsh";
-import { createNativeValue, Easing } from "nsh/animated";
+import { createAnimatedValue, Easing } from "nsh/animated";
 import { Icon, type IconName } from "./icons";
 import { color, mono, radius } from "./theme";
 
@@ -104,9 +104,9 @@ export function Panel(props: {
         <If when={props.onOpen}>
           <View
             onPress={props.onOpen}
-            activeOpacity={0.5}
+            activeStyle={{ opacity: 0.5 }}
             hitSlop={6}
-            accessibilityRole="button"
+            role="button"
             accessibilityLabel={`${props.title} details`}
             style={tile}
           >
@@ -188,7 +188,7 @@ export function Caption(props: { label: JSX.Element; value?: JSX.Element; tint?:
 /** A bar that grows to `value` (0…1) on the UI thread when it appears and
  * when the value changes; past `warnAbove` it turns amber. */
 export function Gauge(props: { value: number; warnAbove?: number }) {
-  const fill = createNativeValue(0);
+  const fill = createAnimatedValue(0);
   effect(() => {
     fill.timing(props.value, { duration: 650, easing: Easing.out(Easing.cubic) });
   });
@@ -250,7 +250,7 @@ export function Line(props: { first?: boolean; selected?: boolean; children: JSX
 
 /** An on / off switch; a disabled one is dimmed and ignores presses. */
 export function Switch(props: { value: boolean; onChange: (v: boolean) => void; disabled?: boolean; label: string }) {
-  const on = createNativeValue(props.value ? 1 : 0);
+  const on = createAnimatedValue(props.value ? 1 : 0);
   effect(() => {
     on.spring(props.value ? 1 : 0, { stiffness: 380, damping: 28 });
   });
@@ -259,7 +259,7 @@ export function Switch(props: { value: boolean; onChange: (v: boolean) => void; 
       onPress={() => props.onChange(!props.value)}
       disabled={props.disabled}
       hitSlop={8}
-      accessibilityRole="switch"
+      role="switch"
       accessibilityLabel={props.label}
       accessibilityState={{ checked: props.value, disabled: props.disabled }}
       style={{
@@ -306,7 +306,7 @@ export function Tabs<T extends string>(props: { options: readonly T[]; value: T;
           return (
             <View
               onPress={() => props.onChange(option())}
-              accessibilityRole="tab"
+              role="tab"
               accessibilityState={{ selected: on() }}
               style={{
                 flex: 1,
@@ -351,11 +351,11 @@ export function Counter(props: {
         stop();
         repeat = setInterval(() => nudge(d), 90);
       }}
-      onPressOut={stop}
+      onPressUp={stop}
       disabled={d < 0 ? props.value <= props.min : props.value >= props.max}
-      activeOpacity={0.5}
+      activeStyle={{ opacity: 0.5 }}
       hitSlop={6}
-      accessibilityRole="button"
+      role="button"
       accessibilityLabel={`${name} ${props.label}`}
       style={{
         width: 34,
@@ -418,7 +418,7 @@ export function Slider(props: {
     <View
       onLayout={(e) => width.set(e.width)}
       {...track((x) => pick(x))}
-      accessibilityRole="adjustable"
+      role="adjustable"
       accessibilityLabel={props.label}
       accessibilityValue={{ min: props.min, max: props.max, now: props.value }}
       accessibilityActions={[{ name: "increment" }, { name: "decrement" }]}
@@ -496,8 +496,8 @@ export function Action(props: { label: string; primary?: boolean; disabled?: boo
     <View
       onPress={props.onPress}
       disabled={props.disabled}
-      activeOpacity={0.7}
-      accessibilityRole="button"
+      activeStyle={{ opacity: 0.7 }}
+      role="button"
       accessibilityState={{ disabled: props.disabled }}
       style={{
         flex: 1,

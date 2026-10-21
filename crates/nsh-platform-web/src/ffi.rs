@@ -25,6 +25,12 @@ unsafe extern "C" {
     fn js_request_frame();
     #[link_name = "report_error"]
     fn js_report_error(message: *const u8, len: usize);
+    /// A message of a test session's app for the dev server (JSON
+    /// `nsh_dev::protocol::ClientMessage`: its requests), sent over the
+    /// page's socket.
+    #[cfg(feature = "dev")]
+    #[link_name = "test_send"]
+    fn js_test_send(json: *const u8, len: usize);
     #[link_name = "log"]
     fn js_log(level: u32, message: *const u8, len: usize);
     #[link_name = "read_asset"]
@@ -51,8 +57,42 @@ unsafe extern "C" {
     fn js_fetch_pause(id: u32, paused: u32);
     #[link_name = "fetch_cancel"]
     fn js_fetch_cancel(id: u32);
+    #[link_name = "filesystem_start"]
+    fn js_filesystem_start(id: u32, p: *const u8, l: usize, bp: *const u8, bl: usize);
+    #[link_name = "filesystem_cancel"]
+    fn js_filesystem_cancel(id: u32);
+    #[link_name = "websocket_start"]
+    fn js_websocket_start(id: u32, request: *const u8, len: usize) -> u32;
+    #[link_name = "websocket_send"]
+    fn js_websocket_send(id: u32, data: *const u8, len: usize, binary: u32) -> u32;
+    #[link_name = "websocket_close"]
+    fn js_websocket_close(id: u32, code: u32, reason: *const u8, len: usize) -> u32;
+    #[link_name = "websocket_buffered"]
+    fn js_websocket_buffered(id: u32) -> f64;
+    #[link_name = "websocket_cancel"]
+    fn js_websocket_cancel(id: u32);
     #[link_name = "load_chunk"]
     fn js_load_chunk(id: *const u8, id_len: usize);
+    #[link_name = "storage_load"]
+    fn js_storage_load(prefix: *const u8, prefix_len: usize) -> u32;
+    #[link_name = "storage_set"]
+    fn js_storage_set(
+        prefix: *const u8,
+        prefix_len: usize,
+        key: *const u8,
+        key_len: usize,
+        value: *const u8,
+        value_len: usize,
+    ) -> u32;
+    #[link_name = "storage_remove"]
+    fn js_storage_remove(
+        prefix: *const u8,
+        prefix_len: usize,
+        key: *const u8,
+        key_len: usize,
+    ) -> u32;
+    #[link_name = "storage_clear"]
+    fn js_storage_clear(prefix: *const u8, prefix_len: usize) -> u32;
 }
 
 /// The width of `text` in CSS `font`, in points.
@@ -97,6 +137,13 @@ pub(crate) fn submit(json: &str) {
 pub(crate) fn request_frame() {
     // SAFETY: no arguments.
     unsafe { js_request_frame() }
+}
+
+/// Sends a test session's app's message to the dev server (JSON).
+#[cfg(feature = "dev")]
+pub(crate) fn test_send(json: &str) {
+    // SAFETY: the slice is valid for the call; JS copies it.
+    unsafe { js_test_send(json.as_ptr(), json.len()) }
 }
 
 /// Shows an app error.
@@ -189,4 +236,101 @@ pub(crate) fn fetch_cancel(id: u32) {
 pub(crate) fn load_chunk(id: &str) {
     // SAFETY: the slice is valid for the call; JS copies it.
     unsafe { js_load_chunk(id.as_ptr(), id.len()) }
+}
+
+/// What a `storage_*` call returned: `done` 1, or 0 with the error, which
+/// JS hands over with `nsh_storage_reply` (as the entries `storage_load`
+/// read) before returning.
+fn storage_result(done: u32) -> Result<String, String> {
+    let reply = crate::storage::take_reply().unwrap_or_default();
+    if done == 0 { Err(reply) } else { Ok(reply) }
+}
+
+/// The `localStorage` entries whose keys start with `prefix`, as a JSON
+/// object without the prefix.
+pub(crate) fn storage_load(prefix: &str) -> Result<String, String> {
+    crate::storage::take_reply();
+    // SAFETY: the slice is valid for the call; JS only reads it.
+    storage_result(unsafe { js_storage_load(prefix.as_ptr(), prefix.len()) })
+}
+
+/// Sets `localStorage` entry `prefix` + `key` to `value`.
+pub(crate) fn storage_set(prefix: &str, key: &str, value: &str) -> Result<(), String> {
+    crate::storage::take_reply();
+    // SAFETY: the slices are valid for the call; JS only reads them.
+    let done = unsafe {
+        js_storage_set(
+            prefix.as_ptr(),
+            prefix.len(),
+            key.as_ptr(),
+            key.len(),
+            value.as_ptr(),
+            value.len(),
+        )
+    };
+    storage_result(done).map(drop)
+}
+
+/// Removes `localStorage` entry `prefix` + `key`.
+pub(crate) fn storage_remove(prefix: &str, key: &str) -> Result<(), String> {
+    crate::storage::take_reply();
+    // SAFETY: the slices are valid for the call; JS only reads them.
+    let done = unsafe { js_storage_remove(prefix.as_ptr(), prefix.len(), key.as_ptr(), key.len()) };
+    storage_result(done).map(drop)
+}
+
+/// Removes the `localStorage` entries whose keys start with `prefix`.
+pub(crate) fn storage_clear(prefix: &str) -> Result<(), String> {
+    crate::storage::take_reply();
+    // SAFETY: the slice is valid for the call; JS only reads it.
+    storage_result(unsafe { js_storage_clear(prefix.as_ptr(), prefix.len()) }).map(drop)
+}
+
+/// Opens a browser WebSocket with the serialized request.
+pub(crate) fn websocket_start(id: u32, request: &str) -> bool {
+    // SAFETY: the slice is valid for the call; JS copies it.
+    unsafe { js_websocket_start(id, request.as_ptr(), request.len()) != 0 }
+}
+
+/// Sends one text or binary message on the browser socket.
+pub(crate) fn websocket_send(id: u32, data: &[u8], binary: bool) -> bool {
+    // SAFETY: the slice is valid for the call; JS copies it.
+    unsafe { js_websocket_send(id, data.as_ptr(), data.len(), binary as u32) != 0 }
+}
+
+/// Requests the browser's closing handshake.
+pub(crate) fn websocket_close(id: u32, code: u16, reason: &str) -> bool {
+    // SAFETY: the slice is valid for the call; JS copies it.
+    unsafe { js_websocket_close(id, code as u32, reason.as_ptr(), reason.len()) != 0 }
+}
+
+/// Reads the browser's current queued byte count.
+pub(crate) fn websocket_buffered(id: u32) -> usize {
+    // SAFETY: no pointers.
+    unsafe { js_websocket_buffered(id) as usize }
+}
+
+/// Removes callbacks before closing a discarded browser socket.
+pub(crate) fn websocket_cancel(id: u32) {
+    // SAFETY: no pointers.
+    unsafe { js_websocket_cancel(id) }
+}
+
+/// Begins a browser OPFS operation.
+pub(crate) fn filesystem_start(id: u32, request: &str, bytes: &[u8]) {
+    // SAFETY: JS copies both slices during this call.
+    unsafe {
+        js_filesystem_start(
+            id,
+            request.as_ptr(),
+            request.len(),
+            bytes.as_ptr(),
+            bytes.len(),
+        )
+    }
+}
+/// Detaches an operation when its engine future is dropped.
+pub(crate) fn filesystem_cancel(id: u32) {
+    // SAFETY: only an opaque integer crosses the boundary.
+    unsafe { js_filesystem_cancel(id) }
 }

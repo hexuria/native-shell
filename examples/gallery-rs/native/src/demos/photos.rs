@@ -9,8 +9,8 @@ use std::{rc::Rc, time::Duration};
 use nsh_core::ui::prelude::*;
 
 use crate::ui::{
-    Badge, Button, ButtonVariant, Finish, Finished, IconName, PressProps, Stat, Tone, bind_refresh,
-    colors, columns_for, desktop, icon, pane_width, radius,
+    Badge, Button, ButtonVariant, Finish, Finished, IconName, Stat, Tone, bind_refresh, colors,
+    columns_for, desktop, icon, pane_width, radius,
 };
 
 /// Photos loaded per page.
@@ -70,75 +70,73 @@ fn row(photo: Memo<Option<Photo>>) -> impl IntoElement {
     let field = move |f: fn(&Photo) -> String| {
         move || photo.with(|p| p.as_ref().map(f).unwrap_or_default())
     };
-    crate::ui::Press::element(PressProps {
-        scale: 0.985.into(),
-        label: Prop::bind(move || photo.with(|p| p.as_ref().map(|p| p.title.clone().into()))),
-        ..PressProps::default()
-    })
-    .child(
-        view()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .px_4()
-            .h(px(76.0))
-            .child(
-                image(field(|p| {
-                    format!("https://picsum.photos/seed/{}/112/112", p.id)
-                }))
-                .size(px(56.0))
-                .rounded(px(radius::INSET))
-                .border_curve(BorderCurve::Continuous)
-                .border_1()
-                .border_color(colors::BORDER)
-                .bg(colors::RAISED)
-                .finish(Finish::Raised),
-            )
-            .child(
-                view()
-                    .flex_1()
-                    .gap_1()
-                    .self_stretch()
-                    .justify_center()
-                    .border_b_1()
-                    .border_b_color(colors::LINE)
-                    .child(
-                        text(field(|p| p.title.clone()))
-                            .number_of_lines(1)
-                            .text_size(px(15.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(colors::TEXT),
-                    )
-                    .child(
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(view().size(px(6.0)).rounded(px(3.0)).bg(move || {
-                                photo
-                                    .with(|p| p.as_ref().map_or(Tone::Neutral, |p| p.tone))
-                                    .color()
-                            }))
-                            .child(
-                                text(field(|p| p.author.to_owned()))
-                                    .text_size(px(13.0))
-                                    .text_color(colors::MUTED),
-                            )
-                            .child(
-                                text(field(|p| format!("· {} views", compact(p.views))))
-                                    .text_size(px(13.0))
-                                    .text_color(colors::FAINT)
-                                    .tabular_nums(),
-                            ),
-                    ),
-            )
-            .child(
-                text(field(|p| format!("#{}", p.id)))
-                    .text_size(px(13.0))
-                    .text_color(colors::FAINT)
-                    .tabular_nums(),
-            ),
-    )
+    crate::ui::press()
+        .scale(0.985)
+        .label(move || photo.with(|p| p.as_ref().map(|p| p.title.clone().into())))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .px_4()
+                .h(px(76.0))
+                .child(
+                    image(field(|p| {
+                        format!("https://picsum.photos/seed/{}/112/112", p.id)
+                    }))
+                    .size(px(56.0))
+                    .rounded(px(radius::INSET))
+                    .border_curve(BorderCurve::Continuous)
+                    .border_1()
+                    .border_color(colors::BORDER)
+                    .bg(colors::RAISED)
+                    .finish(Finish::Raised),
+                )
+                .child(
+                    view()
+                        .flex_1()
+                        .gap_1()
+                        .self_stretch()
+                        .justify_center()
+                        .border_b_1()
+                        .border_b_color(colors::LINE)
+                        .child(
+                            text(field(|p| p.title.clone()))
+                                .number_of_lines(1)
+                                .text_size(px(15.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(colors::TEXT),
+                        )
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(view().size(px(6.0)).rounded(px(3.0)).bg(move || {
+                                    photo
+                                        .with(|p| p.as_ref().map_or(Tone::Neutral, |p| p.tone))
+                                        .color()
+                                }))
+                                .child(
+                                    text(field(|p| p.author.to_owned()))
+                                        .text_size(px(13.0))
+                                        .text_color(colors::MUTED),
+                                )
+                                .child(
+                                    text(field(|p| format!("· {} views", compact(p.views))))
+                                        .text_size(px(13.0))
+                                        .text_color(colors::FAINT)
+                                        .tabular_nums(),
+                                ),
+                        ),
+                )
+                .child(
+                    text(field(|p| format!("#{}", p.id)))
+                        .text_size(px(13.0))
+                        .text_color(colors::FAINT)
+                        .tabular_nums(),
+                ),
+        )
 }
 
 /// A photo in the desktop layout's grid: the picture over its title and
@@ -148,79 +146,77 @@ fn tile(photo: Memo<Option<Photo>>) -> impl IntoElement {
     let field = move |f: fn(&Photo) -> String| {
         move || photo.with(|p| p.as_ref().map(f).unwrap_or_default())
     };
-    crate::ui::Press::element(PressProps {
-        scale: 0.97.into(),
-        label: Prop::bind(move || photo.with(|p| p.as_ref().map(|p| p.title.clone().into()))),
-        ..PressProps::default()
-    })
-    .child(
-        view()
-            .p(px(6.0))
-            .gap_2()
-            .rounded(px(radius::CARD))
-            .border_curve(BorderCurve::Continuous)
-            .cursor_pointer()
-            // The card's fill: Tailwind's `paper-card` / `graphite-card`.
-            .hover(|s| s.bg(colors::SURFACE))
-            .child(
-                image(field(|p| {
-                    format!("https://picsum.photos/seed/{}/480/360", p.id)
-                }))
-                .w_full()
-                .aspect_ratio(4.0 / 3.0)
-                .rounded(px(radius::INSET))
+    crate::ui::press()
+        .scale(0.97)
+        .label(move || photo.with(|p| p.as_ref().map(|p| p.title.clone().into())))
+        .child(
+            view()
+                .p(px(6.0))
+                .gap_2()
+                .rounded(px(radius::CARD))
                 .border_curve(BorderCurve::Continuous)
-                .border_1()
-                .border_color(colors::BORDER)
-                .bg(colors::RAISED)
-                .finish(Finish::Raised),
-            )
-            .child(
-                view()
-                    .gap(px(3.0))
-                    .px_1()
-                    .pb_1()
-                    .child(
-                        view()
-                            .flex_row()
-                            .items_baseline()
-                            .gap_2()
-                            .child(
-                                text(field(|p| p.title.clone()))
-                                    .number_of_lines(1)
-                                    .flex_1()
-                                    .text_size(px(14.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(colors::TEXT),
-                            )
-                            .child(
-                                text(field(|p| format!("#{}", p.id)))
-                                    .text_size(px(12.0))
-                                    .text_color(colors::FAINT)
-                                    .tabular_nums(),
-                            ),
-                    )
-                    .child(
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(view().size(px(6.0)).rounded(px(3.0)).bg(move || {
-                                photo
-                                    .with(|p| p.as_ref().map_or(Tone::Neutral, |p| p.tone))
-                                    .color()
-                            }))
-                            .child(
-                                text(field(|p| {
-                                    format!("{} · {} views", p.author, compact(p.views))
+                .cursor_pointer()
+                // The card's fill: Tailwind's `paper-card` / `graphite-card`.
+                .hover(|s| s.bg(colors::SURFACE))
+                .child(
+                    image(field(|p| {
+                        format!("https://picsum.photos/seed/{}/480/360", p.id)
+                    }))
+                    .w_full()
+                    .aspect_ratio(4.0 / 3.0)
+                    .rounded(px(radius::INSET))
+                    .border_curve(BorderCurve::Continuous)
+                    .border_1()
+                    .border_color(colors::BORDER)
+                    .bg(colors::RAISED)
+                    .finish(Finish::Raised),
+                )
+                .child(
+                    view()
+                        .gap(px(3.0))
+                        .px_1()
+                        .pb_1()
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_baseline()
+                                .gap_2()
+                                .child(
+                                    text(field(|p| p.title.clone()))
+                                        .number_of_lines(1)
+                                        .flex_1()
+                                        .text_size(px(14.0))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(colors::TEXT),
+                                )
+                                .child(
+                                    text(field(|p| format!("#{}", p.id)))
+                                        .text_size(px(12.0))
+                                        .text_color(colors::FAINT)
+                                        .tabular_nums(),
+                                ),
+                        )
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(view().size(px(6.0)).rounded(px(3.0)).bg(move || {
+                                    photo
+                                        .with(|p| p.as_ref().map_or(Tone::Neutral, |p| p.tone))
+                                        .color()
                                 }))
-                                .number_of_lines(1)
-                                .text_size(px(12.0))
-                                .text_color(colors::MUTED),
-                            ),
-                    ),
-            ),
-    )
+                                .child(
+                                    text(field(|p| {
+                                        format!("{} · {} views", p.author, compact(p.views))
+                                    }))
+                                    .number_of_lines(1)
+                                    .text_size(px(12.0))
+                                    .text_color(colors::MUTED),
+                                ),
+                        ),
+                ),
+        )
 }
 
 /// The list's header: a card of figures and a hint, fading out and moving
@@ -232,7 +228,7 @@ fn hero(
     refreshing: Signal<bool>,
     refresh: impl Into<Listener<()>>,
     refresh_key: Option<String>,
-    scroll_y: NativeValue,
+    scroll_y: AnimatedValue,
     wide: bool,
 ) -> impl IntoElement {
     view()
@@ -292,7 +288,7 @@ fn hero(
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(colors::TEXT)
                         .tabular_nums()
-                        .letter_spacing(-1.0)
+                        .letter_spacing(px(-1.0))
                         .child(
                             text(" photos")
                                 .text_size(px(15.0))
@@ -324,7 +320,12 @@ fn hero(
                 .items_center()
                 .gap_2()
                 .pt_3()
-                .child(icon(IconName::ArrowDown, 14.0, colors::FAINT))
+                .child(
+                    icon()
+                        .name(IconName::ArrowDown)
+                        .size(14.0)
+                        .tint(colors::FAINT),
+                )
                 .child(
                     text(if is_desktop() {
                         let key = refresh_key.map(|k| format!("{k} refreshes. "));
@@ -371,7 +372,7 @@ pub(crate) fn Photos() -> impl IntoElement {
     let refresh = stored(None::<Spawned<()>>);
     // The list's scroll offset, fed natively: the hero's parallax and fade
     // and the compact bar run without a binding per frame.
-    let scroll_y = native_value(0.0);
+    let scroll_y = animated_value(0.0);
     let on_refresh = move |_: &()| {
         refreshing.set(true);
         let task = set_timeout(Duration::from_millis(800), move || {
@@ -389,19 +390,16 @@ pub(crate) fn Photos() -> impl IntoElement {
         log::info!("loading more after {}", from - 1);
         photos.update(|p| Rc::make_mut(p).extend(make_photos(from, PAGE)));
     };
-    let header = {
-        let scroll_y = scroll_y.clone();
-        move |wide: bool| {
-            hero(
-                count,
-                refreshes,
-                refreshing,
-                on_refresh,
-                refresh_key.clone(),
-                scroll_y.clone(),
-                wide,
-            )
-        }
+    let header = move |wide: bool| {
+        hero(
+            count,
+            refreshes,
+            refreshing,
+            on_refresh,
+            refresh_key.clone(),
+            scroll_y,
+            wide,
+        )
     };
     let footer = || {
         text(format!("Loading {PAGE} more…"))
@@ -414,12 +412,12 @@ pub(crate) fn Photos() -> impl IntoElement {
     let photo_at =
         move |at: Position| computed(move || photos.with(|p| p.get(at.index()).cloned()));
     let phone = {
-        let (header, scroll_y) = (header.clone(), scroll_y.clone());
+        let header = header.clone();
         move || {
             virtual_list(count, move |at| row(photo_at(at)))
-                .estimated_item_size(76.0)
+                .estimated_item_size(px(76.0))
                 .flex_1()
-                .content_padding_bottom(24.0)
+                .content_padding_bottom(px(24.0))
                 .scroll_value(&scroll_y)
                 .refreshing(refreshing)
                 .on_refresh(on_refresh)
@@ -430,27 +428,22 @@ pub(crate) fn Photos() -> impl IntoElement {
     };
     // As many columns as fit, at least 200 pt each: the list follows the
     // window in place.
-    let grid = {
-        let scroll_y = scroll_y.clone();
-        move || {
-            let columns = computed(|| columns_for(200.0, 8, pane_width(), 16.0));
-            virtual_list(count, move |at| tile(photo_at(at)))
-                .columns(columns)
-                // A 4:3 picture across the column, its caption under it.
-                .estimated_item_size(move || {
-                    (pane_width() - 48.0) / columns.get() as f32 * 0.75 + 60.0
-                })
-                .flex_1()
-                .content_padding(24.0)
-                .row_gap(16.0)
-                .column_gap(16.0)
-                .scroll_value(&scroll_y)
-                .refreshing(refreshing)
-                .on_refresh(on_refresh)
-                .on_end_reached(load_more)
-                .header(header(true))
-                .footer(footer())
-        }
+    let grid = move || {
+        let columns = computed(|| columns_for(200.0, 8, pane_width(), 16.0));
+        virtual_list(count, move |at| tile(photo_at(at)))
+            .columns(columns)
+            // A 4:3 picture across the column, its caption under it.
+            .estimated_item_size(move || (pane_width() - 48.0) / columns.get() as f32 * 0.75 + 60.0)
+            .flex_1()
+            .content_padding(px(24.0))
+            .row_gap(px(16.0))
+            .column_gap(px(16.0))
+            .scroll_value(&scroll_y)
+            .refreshing(refreshing)
+            .on_refresh(on_refresh)
+            .on_end_reached(load_more)
+            .header(header(true))
+            .footer(footer())
     };
     view()
         .flex_1()

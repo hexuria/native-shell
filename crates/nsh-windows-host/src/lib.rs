@@ -5,12 +5,14 @@
 //! - `nsh-windows-host --bundle <path> [--trace]` runs a built bundle (`.nshc`
 //!   is QuickJS bytecode, anything else JS source).
 //!
-//! - `--script "wait 800; shot a.png; tap 100 200; wait 300; shot b.png;
-//!   quit"` runs steps once the window shows: screenshots rendered
-//!   offscreen and simulated input, to check the backend without touching
-//!   the screen.
-//! - `--size 390x844` sets the window size in points (default 1200x800,
+//! - `--window-size 390x844` sets the window size in points (default 1200x800,
 //!   wide enough for desktop layouts such as the gallery's sidebar).
+//! - `--data-dir <dir>` keeps the apps' data there instead of the system's
+//!   data directory (`nsh test --target` gives each app a fresh one).
+//! - `--app-id <id>` sets the application id (`com.example.app`); `nsh run`
+//!   passes the app's (`nsh.json` `"id"`). The app's data (`nsh/storage`)
+//!   is kept under the id its bundle carries, in the system's data
+//!   directory.
 //!
 //! Without arguments it connects to the dev server on this machine.
 //!
@@ -29,7 +31,7 @@ pub fn main() -> std::process::ExitCode {
     let mut source = None;
     // As the release runner runs the app: on its own.
     let mut options = AppOptions {
-        limits: Limits::standalone_desktop(),
+        limits: Limits::standalone(),
         ..AppOptions::default()
     };
     let mut args = env::args().skip(1);
@@ -54,12 +56,17 @@ pub fn main() -> std::process::ExitCode {
                 source = Some(AppSource::Bundle(bundle));
             }
             "--trace" => options.trace = true,
-            // Steps run once the window shows (`nsh_platform_windows`'s
-            // `script` module): offscreen screenshots and simulated input.
-            "--script" => options.script = args.next(),
-            "--size" => match args.next().as_deref().and_then(parse_size) {
+            "--app-id" => {
+                if let Some(id) = args.next().filter(|id| !id.is_empty()) {
+                    options.app_id = id;
+                }
+            }
+            // Where apps keep their data (`nsh test --target` gives each app
+            // a fresh one); the system's data directory otherwise.
+            "--data-dir" => options.data_dir = args.next().map(PathBuf::from),
+            "--window-size" => match args.next().as_deref().and_then(parse_size) {
                 Some(size) => options.size = size,
-                None => log::warn!("--size takes <width>x<height> in points, as 390x844"),
+                None => log::warn!("--window-size takes <width>x<height> in points, as 390x844"),
             },
             other => log::warn!("unknown argument {other}"),
         }

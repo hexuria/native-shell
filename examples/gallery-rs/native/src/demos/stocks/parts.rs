@@ -4,17 +4,20 @@
 //! of.
 
 use nsh_core::{
-    Rect,
-    nsh_animation::{Curve, EaseMode},
+    Bounds, Points,
+    animation::{Curve, EaseMode},
     ui::{AnyElement, prelude::*},
 };
 
 use super::live;
-use crate::ui::{Finish, Finished, IconName, PressProps, Tint, colors, icon, press_with};
+use crate::ui::{Finish, Finished, IconName, Tint, colors, icon, press, rect};
 
 /// Grid lines of charts: the hairline color, a step darker on the light
 /// page.
-pub(crate) const GRID: AdaptiveColor = AdaptiveColor::new(colors::BORDER.light, colors::LINE.dark);
+pub(crate) const GRID: AdaptiveColor = AdaptiveColor {
+    light: colors::BORDER.light,
+    dark: colors::LINE.dark,
+};
 
 /// The props of [`SpringBar`].
 #[derive(Debug, Clone, Copy, PartialEq, Props)]
@@ -38,50 +41,44 @@ pub(crate) struct SpringBarProps {
 /// native spring: the bar is the track's width and slides in, clipped.
 #[component]
 pub(crate) fn SpringBar(props: SpringBarProps) -> impl IntoElement {
-    let x = native_value(0.0);
+    let x = animated_value(0.0);
     // The track's width as laid out (0 before), and whether the bar was
     // placed (the first place jumps, later ones spring).
     let width = stored(0.0_f32);
     let placed = stored(false);
     let from_right = props.from_right;
-    let place = {
-        let x = x.clone();
-        move |share: f32| {
-            let width = width.with(|w| *w);
-            if width <= 0.0 {
-                return;
-            }
-            let share = share.clamp(0.0, 1.0);
-            let to = if from_right { 1.0 } else { -1.0 } * (1.0 - share) * width;
-            if placed.replace(true) {
-                let _ = x.spring(
-                    to,
-                    Spring {
-                        stiffness: 180.0,
-                        damping: 22.0,
-                        ..Spring::default()
-                    },
-                );
-            } else {
-                x.set(to);
-            }
+    let place = move |share: f32| {
+        let width = width.get();
+        if width <= 0.0 {
+            return;
+        }
+        let share = share.clamp(0.0, 1.0);
+        let to = if from_right { 1.0 } else { -1.0 } * (1.0 - share) * width;
+        if placed.replace(true) {
+            let _ = x.spring(
+                to,
+                Spring {
+                    stiffness: 180.0,
+                    damping: 22.0,
+                    ..Spring::default()
+                },
+            );
+        } else {
+            x.set(to);
         }
     };
-    {
-        let place = place.clone();
-        effect(move || {
-            let share = props.share.get();
-            untracked(|| place(share));
-        });
-    }
+    effect(move || {
+        let share = props.share.get();
+        untracked(|| place(share));
+    });
     let radius = props.radius.unwrap_or(props.height / 2.0);
     let color = AdaptiveColor::new(props.color.light, props.color.dark);
     view()
         .h(px(props.height))
         .overflow_hidden()
         .rounded(px(radius))
-        .on_layout(move |frame: &Rect| {
-            if width.replace(frame.width) != frame.width {
+        .on_layout(move |frame: &Bounds<Points>| {
+            if width.replace(frame.size.width.0) != frame.size.width.0 {
                 place(props.share.get_untracked());
             }
         })
@@ -93,21 +90,6 @@ pub(crate) fn SpringBar(props: SpringBarProps) -> impl IntoElement {
                 .bg(color)
                 .bind_translate_x(&x),
         )
-}
-
-/// A [`SpringBar`] of `color` filled to `share` (a binding: the bar
-/// springs when it changes).
-pub(crate) fn spring_bar(
-    share: impl Fn() -> f64 + 'static,
-    color: AdaptiveColor,
-) -> SpringBarProps {
-    SpringBarProps {
-        share: Prop::bind(move || share() as f32),
-        color: color.into(),
-        from_right: false,
-        height: 8.0,
-        radius: None,
-    }
 }
 
 /// The props of [`LiveDot`].
@@ -123,8 +105,8 @@ pub(crate) struct LiveDotProps {
 
 /// A value that pulses 0 → 1 over 1.4 s, looped (started by
 /// [`run_pulse`]).
-pub(crate) fn pulse() -> (NativeValue, Animation) {
-    let v = native_value(0.0);
+pub(crate) fn pulse() -> (AnimatedValue, Animation) {
+    let v = animated_value(0.0);
     let looped = Animation::timing(
         &v,
         1.0,
@@ -135,7 +117,7 @@ pub(crate) fn pulse() -> (NativeValue, Animation) {
 }
 
 /// Runs a [`pulse`] while `running`; stopped, it fades back to 0.
-pub(crate) fn run_pulse((v, looped): &(NativeValue, Animation), running: bool) {
+pub(crate) fn run_pulse((v, looped): &(AnimatedValue, Animation), running: bool) {
     if running {
         let _ = looped.start();
     } else {
@@ -149,7 +131,7 @@ pub(crate) fn run_pulse((v, looped): &(NativeValue, Animation), running: bool) {
 #[component]
 pub(crate) fn LiveDot(props: LiveDotProps) -> impl IntoElement {
     let pulse = pulse();
-    let p = pulse.0.clone();
+    let p = pulse.0;
     effect(move || run_pulse(&pulse, props.running.get()));
     let size = props.size;
     view()
@@ -174,14 +156,6 @@ pub(crate) fn LiveDot(props: LiveDotProps) -> impl IntoElement {
         }))
 }
 
-/// [`LiveDot`] of `size`, pulsing while the market runs.
-pub(crate) fn live_dot(running: Signal<bool>, size: f32) -> ComponentElement<LiveDot> {
-    LiveDot::element(LiveDotProps {
-        running: running.into(),
-        size,
-    })
-}
-
 /// Pauses or resumes the market: a pill while it runs, citrus while it
 /// is paused.
 #[component]
@@ -189,49 +163,46 @@ pub(crate) fn MarketButton() -> impl IntoElement {
     let running = live().running;
     // In a view: the press takes the styles a parent gives the button.
     view().child(
-        press_with(
-            PressProps {
-                hit_slop: Some(6.0),
-                label: Prop::bind(move || {
-                    Some(
-                        if running.get() {
-                            "Pause the market"
-                        } else {
-                            "Resume the market"
-                        }
-                        .into(),
-                    )
-                }),
-                ..PressProps::default()
-            },
-            move |_: &()| running.update(|r| *r = !*r),
-        )
-        .child(
-            view()
-                .size(px(32.0))
-                .rounded(px(16.0))
-                .items_center()
-                .justify_center()
-                .style_when(running, |v| v.finish(Finish::Pill).border_1())
-                .style_when(move || !running.get(), |v| v.finish(Finish::Accent))
-                .child(icon(
-                    Prop::bind(move || {
-                        if running.get() {
-                            IconName::Pause
-                        } else {
-                            IconName::Play
-                        }
-                    }),
-                    13.0,
-                    move || {
-                        if running.get() {
-                            colors::MUTED
-                        } else {
-                            colors::ON_ACCENT
-                        }
-                    },
-                )),
-        ),
+        press()
+            .hit_slop(6.0)
+            .label(move || {
+                Some(
+                    if running.get() {
+                        "Pause the market"
+                    } else {
+                        "Resume the market"
+                    }
+                    .into(),
+                )
+            })
+            .on_press(move || running.update(|r| *r = !*r))
+            .child(
+                view()
+                    .size(px(32.0))
+                    .rounded(px(16.0))
+                    .items_center()
+                    .justify_center()
+                    .style_when(running, |v| v.finish(Finish::Pill).border_1())
+                    .style_when(move || !running.get(), |v| v.finish(Finish::Accent))
+                    .child(
+                        icon()
+                            .name(move || {
+                                if running.get() {
+                                    IconName::Pause
+                                } else {
+                                    IconName::Play
+                                }
+                            })
+                            .size(13.0)
+                            .tint(move || {
+                                if running.get() {
+                                    colors::MUTED
+                                } else {
+                                    colors::ON_ACCENT
+                                }
+                            }),
+                    ),
+            ),
     )
 }
 
@@ -269,14 +240,14 @@ impl Calm {
 
 /// Diagonal stripes over a rectangle (projections, zones).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn hatch(p: Painter, x: f32, y: f32, w: f32, h: f32, color: Color, gap: f32) -> Painter {
+pub(crate) fn hatch(p: Painter, x: f32, y: f32, w: f32, h: f32, color: Hsla, gap: f32) -> Painter {
     if w <= 0.0 || h <= 0.0 {
         return p;
     }
     let mut p = p
         .save()
         .begin_path()
-        .rect(x, y, w, h)
+        .rect(rect(x, y, w, h))
         .clip()
         .stroke_color(color)
         .line_width(1.0)
@@ -290,7 +261,14 @@ pub(crate) fn hatch(p: Painter, x: f32, y: f32, w: f32, h: f32, color: Color, ga
 }
 
 /// A dashed horizontal line.
-pub(crate) fn dashed(p: Painter, x0: f32, x1: f32, y: f32, color: Color, dash: &[f32]) -> Painter {
+pub(crate) fn dashed(
+    p: Painter,
+    x0: f32,
+    x1: f32,
+    y: f32,
+    color: Hsla,
+    dash: &[Points],
+) -> Painter {
     p.stroke_color(color)
         .line_width(1.0)
         .line_dash(dash)
@@ -403,5 +381,5 @@ pub(crate) fn head(label: &'static str, col: Col, right: bool) -> Text {
         .text_size(px(11.0))
         .text_color(colors::FAINT)
         .tabular_nums()
-        .letter_spacing(0.6)
+        .letter_spacing(px(0.6))
 }

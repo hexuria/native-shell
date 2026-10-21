@@ -2,7 +2,7 @@
 //! [`Segmented`].
 
 use nsh_core::{
-    Rect,
+    Bounds, Points,
     ui::{JsObject, PropEnum, prelude::*},
 };
 
@@ -34,19 +34,16 @@ fn knob(on: bool) -> f32 {
 /// natively.
 #[component]
 pub(crate) fn Toggle(props: ToggleProps, cx: Scope<ToggleEvent>) -> impl IntoElement {
-    let on = native_value(knob(props.value.get_untracked()));
+    let on = animated_value(knob(props.value.get_untracked()));
     // A new value from the owner springs the knob there.
-    let spring = on.clone();
     let shown = stored(props.value.get_untracked());
     effect(move || {
         let value = props.value.get();
         if shown.replace(value) != value {
-            spring.spring(knob(value), motion::SETTLE);
+            on.spring(knob(value), motion::SETTLE);
         }
     });
     let (knob_light, _) = Finish::Knob.shadows();
-    let press = on.clone();
-    let track = on.clone();
     view()
         .w(px(50.0))
         .h(px(30.0))
@@ -65,10 +62,10 @@ pub(crate) fn Toggle(props: ToggleProps, cx: Scope<ToggleEvent>) -> impl IntoEle
             }),
             ..AccessibilityState::default()
         })
-        .hit_slop(EdgeInsets::all(8.0))
-        .on_press(move |_: &()| {
+        .hit_slop(EdgeInsets::all(px(8.0)))
+        .on_press(move || {
             let next = !props.value.get_untracked();
-            press.spring(knob(next), motion::SETTLE);
+            on.spring(knob(next), motion::SETTLE);
             cx.emit(ToggleEvent::Change(next));
         })
         // Inside the border: its radius less the border's width; its colors
@@ -80,7 +77,7 @@ pub(crate) fn Toggle(props: ToggleProps, cx: Scope<ToggleEvent>) -> impl IntoEle
                 .rounded(px(14.0))
                 .pointer_events(PointerEvents::None)
                 .bind_background(
-                    &track.interpolate_colors(&[0.0, 1.0], &[colors::TRACK, colors::ACCENT_FILL]),
+                    &on.interpolate_colors(&[0.0, 1.0], &[colors::TRACK, colors::ACCENT_FILL]),
                 ),
         )
         .child(
@@ -98,35 +95,23 @@ pub(crate) fn Toggle(props: ToggleProps, cx: Scope<ToggleEvent>) -> impl IntoEle
                 .bg_linear_to_b()
                 .gradient_from(rgb_a(0xffffff, 0.3))
                 .gradient_to(rgb_a(0xffffff, 0.0))
-                .gradient_to_position(0.6)
+                .gradient_to_position(percentage(0.6))
                 .adaptive_shadow(
                     knob_light.iter().copied(),
                     [
                         inset_shadow(1.0, 0.0, rgb_a(0xffffff, 0.2)),
                         BoxShadow {
-                            offset_x: 0.0,
-                            offset_y: 1.0,
-                            blur: 3.0,
-                            spread: 0.0,
-                            color: rgb_a(0x000000, 0.4),
+                            offset_x: px(0.0),
+                            offset_y: px(1.0),
+                            blur: px(3.0),
+                            spread: px(0.0),
+                            color: rgb_a(0x000000, 0.4).to_packed(),
                             inset: false,
                         },
                     ],
                 )
                 .bind_translate_x(&on.interpolate(&[0.0, 1.0], &[0.0, 20.0])),
         )
-}
-
-/// A [`Toggle`] at `value` with accessibility label `label`; its owner
-/// handles [`ToggleEvent::Change`] with `.on_event(..)`.
-pub(crate) fn toggle(
-    value: impl Into<Prop<bool>>,
-    label: impl Into<SharedString>,
-) -> ComponentElement<Toggle> {
-    Toggle::element(ToggleProps {
-        value: value.into(),
-        label: Some(label.into()).into(),
-    })
 }
 
 /// A segment of [`Segmented`].
@@ -192,9 +177,8 @@ pub(crate) fn Segmented(props: SegmentedProps, cx: Scope<SegmentedEvent>) -> imp
     let count = computed(move || props.options.with(Vec::len).max(1));
     let segment = computed(move || (width.get() - 6.0) / count.get() as f32);
     // The indicator's offset: the first place jumps, later moves spring.
-    let x = native_value(0.0);
+    let x = animated_value(0.0);
     let placed = stored(false);
-    let mover = x.clone();
     effect(move || {
         let index = (props.selected.get() as usize).min(count.get() - 1);
         let to = index as f32 * segment.get();
@@ -202,9 +186,9 @@ pub(crate) fn Segmented(props: SegmentedProps, cx: Scope<SegmentedEvent>) -> imp
             return;
         }
         if placed.replace(true) {
-            mover.spring(to, motion::SETTLE);
+            x.spring(to, motion::SETTLE);
         } else {
-            mover.set(to);
+            x.set(to);
         }
     });
     let small = props.size == SegmentedSize::Small;
@@ -232,7 +216,7 @@ pub(crate) fn Segmented(props: SegmentedProps, cx: Scope<SegmentedEvent>) -> imp
                         selected: selected.get(),
                         ..AccessibilityState::default()
                     })
-                    .on_press(move |_: &()| cx.emit(SegmentedEvent::Change(i)))
+                    .on_press(move || cx.emit(SegmentedEvent::Change(i)))
                     .child(
                         text(option.label)
                             .number_of_lines(1)
@@ -274,7 +258,7 @@ pub(crate) fn Segmented(props: SegmentedProps, cx: Scope<SegmentedEvent>) -> imp
         .border_1()
         .border_color(colors::BORDER)
         .role(AccessibilityRole::Tablist)
-        .on_layout(move |frame: &Rect| width.set(frame.width))
+        .on_layout(move |frame: &Bounds<Points>| width.set(frame.size.width.0))
         .child(
             view()
                 .absolute()
@@ -289,17 +273,4 @@ pub(crate) fn Segmented(props: SegmentedProps, cx: Scope<SegmentedEvent>) -> imp
                 .bind_translate_x(&x),
         )
         .child(segments)
-}
-
-/// A [`Segmented`] of `options` with `selected` selected; its owner
-/// handles [`SegmentedEvent::Change`] with `.on_event(..)`.
-pub(crate) fn segmented(
-    options: impl IntoIterator<Item = Segment>,
-    selected: impl Into<Prop<u32>>,
-) -> ComponentElement<Segmented> {
-    Segmented::element(SegmentedProps {
-        options: options.into_iter().collect::<Vec<_>>().into(),
-        selected: selected.into(),
-        size: SegmentedSize::Regular,
-    })
 }

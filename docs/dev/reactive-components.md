@@ -1,7 +1,8 @@
 # Reactive Rust components (design proposal)
 
 Status: implemented. `docs/dev/components.md` is the reference for the API as built; this page keeps the proposal
-and its reasons. Where the implementation differs from the proposal:
+and its reasons. The components it takes as examples (`Button`, `Stepper`, `Sheet` of `nsh-ui-mobile`) were NSH's own
+when it was written; NSH now ships capabilities and no styled components, and the same API writes an app's own. Where the implementation differs from the proposal:
 
 - **The shape.** `#[component] fn Stepper(props: StepperProps, cx: Scope<StepperEvent>) -> impl IntoElement`:
   `Scope` is typed by the event, not the component (it only emits, reads the insets and registers methods), and the
@@ -47,7 +48,7 @@ An update costs what it changes, not what was rendered.
   progress bar or a live feed in a big component costs the same as in a small one.
 - It is the model TSX apps already have (`docs/dev/architecture.md`: "Components run once. Only bindings re-run"). The
   rule "what TSX can write, Rust can write" becomes the same way of writing, not just the same capabilities: a
-  component body that runs once, `signal`, `computed`, `effect`, `cleanup`, `If`, `Each`.
+  component body that runs once, `signal`, `computed`, `effect`, `cleanup`, `when`, `each`.
 
 What does not change: the first render costs about the same; structural changes (rows added, removed, reordered)
 are still reconciled by key, as `Each` does in JS; layout, text and the core's frame and style diffs are the core's in
@@ -141,7 +142,7 @@ untracked(|| count.get());
   for today).
 - Equality: `signal(v)` requires `T: PartialEq` and skips writes of an equal value, as TSX's default `===` does.
   `signal_with(v, Equals::Never)` notifies on every write and needs no `PartialEq`. `computed` requires `PartialEq`.
-- Owners are Solid's: a component's body, an effect, a branch of `If`, a row of `Each` and a list cell each own what
+- Owners are Solid's: a component's body, an effect, a branch of `when`, a row of `each` and a list cell each own what
   they create, and dispose it (signals, effects, timers, tasks, subscriptions) when they go.
 
 ### Components
@@ -239,25 +240,25 @@ view().w(move || px(width.get()))
 - Styles that depend on app state: `.style_when(selected, |s| s.bg(theme.accent))` takes a reactive condition,
   lowers the extra layer once, and the binding switches it on and off. Native states (`.active`, `.hover`, `.dark`,
   `group_*`) stay native and need no binding, as today.
-- `NativeValue` animation bindings (`bind_opacity`, `bind_translate_y`, ...) stay: they are bindings already, evaluated
-  on the UI thread. A plain signal is for values the app computes; a native value for values the UI thread drives.
+- `AnimatedValue` animation bindings (`bind_opacity`, `bind_translate_y`, ...) stay: they are bindings already, evaluated
+  on the UI thread. A plain signal is for values the app computes; an animated value for values the UI thread drives.
 
 ### Control flow
 
 The TSX primitives, with the same semantics and the same keyed reconciliation:
 
 ```rust
-If::new(open, move || sheet_body())                 // <If when={open()}>…</If>
+when(open, move || sheet_body())                 // <If when={open()}>…</If>
     .otherwise(move || text("Closed"))
-Each::new(move || rows.get(), |row| row.id, move |row, index| row_view(row, index))
+each(move || rows.get(), |row| row.id, move |row, index| row_view(row, index))
                                                     // <Each of={rows()} key="id">{(row, i) => …}</Each>
 dynamic(move || if wide.get() { two_columns() } else { one_column() })
 ```
 
-- A branch of `If` and a row of `Each` own what they create, and dispose it when they go.
-- `Each`'s row gets its item and its index as signals: a moved row keeps its nodes and updates its index binding.
+- A branch of `when` and a row of `each` own what they create, and dispose it when they go.
+- `each`'s row gets its item and its index as signals: a moved row keeps its nodes and updates its index binding.
 - `.when(bool, ..)` and `.children(Option)` stay, with a plain `bool` / `Option`, for choices made once when the view
-  is built. A choice that changes is an `If` (structure) or a `.style_when` (style).
+  is built. A choice that changes is a `when` (structure) or a `.style_when` (style).
 - Lists: `virtual_list(count, move |index| row(index))` makes each cell's content once; when the cell shows another
   row, its `index: ReadSignal<usize>` changes and only the bindings that read it run. This is how JS's list cells work
   (`list::bind` writes the cell's item and index signals). Today every live cell renders again whenever the owner does.
@@ -265,7 +266,7 @@ dynamic(move || if wide.get() { two_columns() } else { one_column() })
 ### Children, slots, items
 
 - `props.children` and `props.header` (a `Slot`) are placed once where the body puts them. Lazy children (`#[prop(lazy)]`)
-  are made while the place that holds them is mounted: `If::new(open, move || props.children)` makes them only while
+  are made while the place that holds them is mounted: `when(open, move || props.children)` makes them only while
   open, as `Sheet` needs. The event that tells JS stays (`JsEvent::Children`).
 - `children_each(children, |child, at| ..)` and `list(items, ..)` become `Each`-like: one wrapper per JS child, made
   once, with `at` as a signal.
@@ -287,6 +288,9 @@ dynamic(move || if wide.get() { two_columns() } else { one_column() })
   when the owner goes. Async code writes signals directly; `WeakComponent`, `this.update(..)` and `Updated` go.
 - `set_timeout`, `set_interval`, `request_animation_frame`, `timer(..).await`, `next_frame().await`: free functions,
   owned the same way. Dropping the returned handle still cancels early.
+- `resource(source, fetcher)` (TS: `resource`): a render effect reads the source and spawns the load, whose task the
+  next run (or the owner's disposal) drops, cancelling what it awaited; the value, error and state are signals, and
+  which load counts is `nsh_core::resource::Runs`, the JS face's too.
 - Platform services (`dialog`, `toast`, `set_clipboard`, `clipboard_string`, `announce`, `image_size`, ...) become free
   functions on the current runtime, as `nsh/*` modules are free functions in TSX. `Context`, `RenderCx` and `AsyncCx`
   go; `ModuleCx` keeps only what a module call needs.
@@ -313,13 +317,13 @@ bindings, and pushes `Op`s into a queue the core applies, exactly as JS's ops ar
 
 What leaves the core: `render_components`, `MAX_RENDERS`, `Expanded`, `reconcile_children` / `reconcile_node` /
 `reconcile_raw`, `Attrs::changes`, `ListConfig::changes`, per-render handler tables, `RenderReads` and the scans for
-readers of the environment, globals and context, `NativeNode::derive`'s de-duplication (it existed because renders ran
+readers of the environment, globals and context, `AnimatedNode::derive`'s de-duplication (it existed because renders ran
 again), the "absent means default" resets. What stays: host nodes, odd ids, prop decoding, event routing, slots and
 children holders, the JS glue, the declarations.
 
 ## Example: `Stepper`
 
-Today (`crates/nsh-ui-mobile/src/stepper.rs`, 230 lines): state in fields, `setup` and `props_changed` to keep the value
+At the time (`crates/nsh-ui-mobile/src/stepper.rs`, 230 lines): state in fields, `setup` and `props_changed` to keep the value
 in range, `Context` methods, a `spawn` with `this.update(..)` to repeat while held, and a render that runs again on
 every step.
 
@@ -373,16 +377,16 @@ impl Component for Stepper {
                 .size_10()
                 .items_center()
                 .justify_center()
-                .rounded(px(theme().radius))
-                .bg(theme().secondary)
-                .active(|s| s.bg(theme().secondary_active))
+                .rounded(theme().radius())
+                .bg(theme().muted())
+                .active(|s| s.bg(theme().border()))
                 .style_when(off, |s| s.opacity(0.4))
                 .disabled(off)
                 .role(AccessibilityRole::Button)
                 .label(name)
                 .on_press_in(move |_| press(direction))
                 .on_press_out(move |_| repeat.set(None))
-                .child(text(label).text_size(px(theme().font_size + 4.0)))
+                .child(text(label).text_size(theme().font_size() + px(4.0)))
         };
         view()
             .flex_row()

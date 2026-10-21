@@ -7,14 +7,18 @@
 //!   `StaticLayout` (through JNI), and every commit is encoded into one
 //!   `byte[]` (+ an object array for strings and layouts) that a single JNI
 //!   call hands to the UI thread, where `Mounter.java` applies it.
-//! - Native animations (the `nsh-animation` graph) run on the UI thread in Rust:
+//! - Native animations (nsh-core's `animation` graph) run on the UI thread in Rust:
 //!   `Choreographer` ticks call in, and changed values come back as a
 //!   compact array.
+//! - Selections across the texts of a selection area use nsh-core's model
+//!   on the UI thread too (`selection_area.rs`, `SelectionArea.java`).
 //!
 //! On non-Android targets this crate is empty.
 
 #![cfg(target_os = "android")]
 
+#[cfg(feature = "dev")]
+mod agent;
 mod animation;
 #[cfg(feature = "dev")]
 mod dev;
@@ -25,6 +29,8 @@ mod logger;
 mod net;
 #[cfg(feature = "js")]
 mod package;
+mod selection_area;
+mod svg;
 mod text;
 
 use std::ffi::c_void;
@@ -32,12 +38,14 @@ use std::ffi::c_void;
 pub use host::run_root;
 /// What [`ui_sets!`] gives.
 pub use nsh_core::ui::Registry;
+/// What [`root!`] gives.
+pub use nsh_engine::Root;
 
-/// The UI sets apps import ([`set_ui_sets`]; by default the mobile UI).
+/// The UI sets apps import ([`set_ui_sets`]; by default `nsh/base`).
 static UI_SETS: std::sync::RwLock<Option<Vec<nsh_core::ui::Registry>>> =
     std::sync::RwLock::new(None);
 
-/// Sets the UI sets the engines started from now on serve: the mobile UI
+/// Sets the UI sets the engines started from now on serve: `nsh/base`
 /// and an app's own Rust components (`nsh.json` `"rust"`), which a host
 /// built for the app passes before it starts.
 pub fn set_ui_sets(sets: Vec<nsh_core::ui::Registry>) {
@@ -45,7 +53,7 @@ pub fn set_ui_sets(sets: Vec<nsh_core::ui::Registry>) {
 }
 
 /// The UI sets engines serve: [`set_ui_sets`]'s, else those of an app
-/// library built with [`ui_sets!`], else the mobile UI.
+/// library built with [`ui_sets!`], else `nsh/base`.
 fn ui_sets() -> Vec<nsh_core::ui::Registry> {
     if let Some(sets) = UI_SETS.read().unwrap_or_else(|e| e.into_inner()).clone() {
         return sets;
@@ -58,11 +66,11 @@ fn ui_sets() -> Vec<nsh_core::ui::Registry> {
         let sets: fn() -> Vec<nsh_core::ui::Registry> = unsafe { std::mem::transmute(app) };
         return sets();
     }
-    vec![nsh_ui_mobile::registry()]
+    vec![nsh_base::registry()]
 }
 
 /// Makes this library an app's `libnsh.so` that serves `$sets` (an
-/// expression giving the `Vec<Registry>` of the mobile UI and the app's
+/// expression giving the `Vec<Registry>` of `nsh/base` and the app's
 /// own Rust components): `nsh run` builds one for apps with `"rust"` in
 /// `nsh.json`.
 #[macro_export]
@@ -74,6 +82,34 @@ macro_rules! ui_sets {
         }
     };
 }
+/// Makes `$root` (an expression giving a [`Root`]) the root of
+/// an app of Rust only (`nsh.json` `"root"`) in this development library:
+/// what it runs when its dev server publishes the app as the host's root
+/// (`nsh test --target android` of such an app) instead of a bundle.
+#[macro_export]
+macro_rules! root {
+    ($root:expr) => {
+        #[unsafe(no_mangle)]
+        fn nsh_app_root() -> $crate::Root {
+            $root
+        }
+    };
+}
+
+/// The app's Rust root, if this library has one ([`root!`]).
+#[cfg(feature = "dev")]
+fn app_root() -> Option<Root> {
+    // SAFETY: looks up a symbol of the loaded libraries; [`root!`] defines
+    // it with this signature, in a library built with this crate.
+    let root = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"nsh_app_root".as_ptr()) };
+    if root.is_null() {
+        return None;
+    }
+    // SAFETY: as above.
+    let root: fn() -> Root = unsafe { std::mem::transmute(root) };
+    Some(root())
+}
+
 /// The JNI bindings [`main`] expands to.
 pub use jni;
 use jni::{JavaVM, sys::jint};

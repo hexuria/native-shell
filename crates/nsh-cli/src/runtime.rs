@@ -15,7 +15,6 @@
 //! runtime/windows/nsh-windows-host.exe       development host (Windows)
 //! runtime/windows/nsh-windows-app.exe        release runner (Windows)
 //! runtime/gpui/nsh-gpui-host[.exe]           development host (GPUI, this OS)
-//! runtime/gpui/nsh-gpui-app[.exe]            release runner (GPUI, this OS)
 //! runtime/android/release/             classes.dex + lib/<abi>/libnsh.so
 //! runtime/android/dev/                 the same with development support
 //! runtime/web/nsh.wasm                 the web runtime (`nsh-platform-web`)
@@ -57,7 +56,8 @@ pub(crate) enum Platform {
     MacOs,
     /// Windows (Win32), on this machine.
     Windows,
-    /// GPUI, on this machine (macOS, Windows or Linux).
+    /// GPUI, on this machine (macOS, Windows or Linux): a development host
+    /// only, as GPUI is the backend for embedding in GPUI apps.
     Gpui,
 }
 
@@ -95,7 +95,7 @@ impl Platform {
             (Platform::Windows, false) => "nsh-windows-host",
             (Platform::Windows, true) => "nsh-windows-app",
             (Platform::Gpui, false) => "nsh-gpui-host",
-            (Platform::Gpui, true) => "nsh-gpui-app",
+            (Platform::Gpui, true) => unreachable!("GPUI apps are embedded, never packaged"),
             (_, false) => "nsh-ios-host",
             (_, true) => "nsh-ios-app",
         }
@@ -153,6 +153,16 @@ pub(crate) fn android(dev: bool) -> anyhow::Result<PathBuf> {
     match crate::rust_app::current() {
         // The app's own library with the prebuilt Java runtime.
         Some(app) => app.android(&prebuilt, dev),
+        None => Ok(prebuilt),
+    }
+}
+
+/// The Android runtime `nsh test --target android` runs apps in: the
+/// development one, a Rust app's too ([`crate::rust_app::RustApp::test_android`]).
+pub(crate) fn test_android() -> anyhow::Result<PathBuf> {
+    let prebuilt = prebuilt_android(true)?;
+    match crate::rust_app::current() {
+        Some(app) => app.test_android(&prebuilt),
         None => Ok(prebuilt),
     }
 }
@@ -245,6 +255,15 @@ impl WebKind {
 /// The web runtime ([`WebRuntime`]) of `kind`. In a checkout it is built
 /// first when `build` is set; without it, the build that is there, if any
 /// (`None`).
+/// The web runtime `nsh test --target web` runs apps in: the development
+/// host's, a Rust app's too ([`crate::rust_app::RustApp::test_web`]).
+pub(crate) fn test_web() -> anyhow::Result<WebRuntime> {
+    match crate::rust_app::current() {
+        Some(app) => app.test_web(),
+        None => web(WebKind::Dev, true)?.context("no web runtime"),
+    }
+}
+
 pub(crate) fn web(kind: WebKind, build: bool) -> anyhow::Result<Option<WebRuntime>> {
     const WASM: &str = "wasm32-unknown-unknown";
     // An app with Rust components of its own: a runtime with its set.
@@ -287,7 +306,7 @@ pub(crate) fn web(kind: WebKind, build: bool) -> anyhow::Result<Option<WebRuntim
         .join("web");
     let features: &[&str] = match kind {
         WebKind::Release => &["--features", "bytecode-only"],
-        WebKind::Dev => &[],
+        WebKind::Dev => &["--features", "dev"],
     };
     if build {
         let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
@@ -297,6 +316,7 @@ pub(crate) fn web(kind: WebKind, build: bool) -> anyhow::Result<Option<WebRuntim
             .args(features)
             .args(["--target", WASM])
             .current_dir(&root);
+        web_build_flags(&mut command);
         // QuickJS' archive needs an `ar` that knows WebAssembly objects.
         let ar = format!("AR_{}", WASM.replace('-', "_"));
         if env::var_os(&ar).is_none() && env::var_os("AR").is_none() {
@@ -324,6 +344,15 @@ pub(crate) fn web(kind: WebKind, build: bool) -> anyhow::Result<Option<WebRuntim
 /// Path of the development host (`runner` false) or release runner for
 /// `platform` ([`Platform::binary`]): for an app with a Rust crate, its own
 /// build.
+/// The development host `nsh test --target` runs apps in on `platform`: a
+/// Rust app's too ([`crate::rust_app::RustApp::test_host`]).
+pub(crate) fn test_host(platform: Platform) -> anyhow::Result<PathBuf> {
+    match crate::rust_app::current() {
+        Some(app) => app.test_host(platform),
+        None => file(platform, false),
+    }
+}
+
 pub(crate) fn file(platform: Platform, runner: bool) -> anyhow::Result<PathBuf> {
     if let Some(app) = crate::rust_app::current() {
         return app.runtime(platform, runner);
@@ -357,6 +386,7 @@ pub(crate) fn file(platform: Platform, runner: bool) -> anyhow::Result<PathBuf> 
         let target_dir = target_dir.to_string_lossy();
         if matches!(platform, Platform::Gpui) {
             args.extend(["--manifest-path", &manifest, "--target-dir", &target_dir]);
+            args.extend(gpui_features());
         }
         if let Some(triple) = platform.triple() {
             args.extend(["--target", triple]);
@@ -388,6 +418,33 @@ pub(crate) fn file(platform: Platform, runner: bool) -> anyhow::Result<PathBuf> 
     existing(built, platform, name)
 }
 
+/// The cargo arguments a build of a GPUI host adds: on a Mac
+/// where Xcode cannot run `metal`, which GPUI's build script precompiles
+/// its shaders with, `nsh-platform-gpui`'s `runtime-shaders` feature, so
+/// GPUI compiles them when the app starts. Every GPUI host, the
+/// checkout's and those of apps with Rust crates, depends on
+/// `nsh-platform-gpui`.
+pub(crate) fn gpui_features() -> &'static [&'static str] {
+    if !metal_toolchain_missing() {
+        return &[];
+    }
+    crate::ui::note(
+        "no Metal Toolchain: GPUI compiles its shaders when the app starts \
+         (`xcodebuild -downloadComponent MetalToolchain` installs one to precompile them)",
+    );
+    &["--features", "nsh-platform-gpui/runtime-shaders"]
+}
+
+/// Whether this is a Mac where Xcode cannot run `metal` (no Metal
+/// Toolchain).
+fn metal_toolchain_missing() -> bool {
+    cfg!(target_os = "macos")
+        && !Command::new("xcrun")
+            .args(["metal", "--version"])
+            .output()
+            .is_ok_and(|out| out.status.success())
+}
+
 /// The workspace of a cargo checkout of nsh this CLI was built in
 /// (`<root>/target/<profile>/nsh`), if it is one.
 fn checkout(bin: &Path) -> Option<PathBuf> {
@@ -395,6 +452,36 @@ fn checkout(bin: &Path) -> Option<PathBuf> {
     root.join("crates/nsh-ios-host/Cargo.toml")
         .exists()
         .then(|| root.to_owned())
+}
+
+/// Selects the browser entropy provider for all dependencies of a web build.
+/// Cargo config arrays merge, preserving the workspace's stack link argument.
+pub(crate) fn web_build_flags(command: &mut Command) {
+    append_web_flags(
+        command,
+        env::var_os("CARGO_ENCODED_RUSTFLAGS"),
+        env::var_os("RUSTFLAGS")
+            .or_else(|| env::var_os("CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS")),
+    );
+}
+
+fn append_web_flags(command: &mut Command, encoded: Option<OsString>, plain: Option<OsString>) {
+    // Environment flags override Cargo config, so append there when present.
+    if let Some(mut flags) = encoded {
+        if !flags.is_empty() {
+            flags.push("\x1f");
+        }
+        flags.push("--cfg\x1fgetrandom_backend=\"custom\"");
+        command.env("CARGO_ENCODED_RUSTFLAGS", flags);
+    } else if let Some(mut flags) = plain {
+        flags.push(" --cfg getrandom_backend=\"custom\"");
+        command.env("RUSTFLAGS", flags);
+    } else {
+        command.args([
+            "--config",
+            r#"target.wasm32-unknown-unknown.rustflags=["--cfg", "getrandom_backend=\"custom\""]"#,
+        ]);
+    }
 }
 
 /// Runs cargo in the checkout `root` (the one that runs this CLI under
@@ -424,14 +511,55 @@ mod tests {
     use super::Platform;
 
     #[test]
+    fn web_entropy_flags_preserve_existing_rustflags() {
+        use std::{ffi::OsString, process::Command};
+
+        for (encoded, plain, key, expected) in [
+            (
+                Some("-C\x1flink-arg=-zstack-size=8388608"),
+                None,
+                "CARGO_ENCODED_RUSTFLAGS",
+                "-C\x1flink-arg=-zstack-size=8388608\x1f--cfg\x1fgetrandom_backend=\"custom\"",
+            ),
+            (
+                None,
+                Some("-C link-arg=-zstack-size=8388608"),
+                "RUSTFLAGS",
+                "-C link-arg=-zstack-size=8388608 --cfg getrandom_backend=\"custom\"",
+            ),
+        ] {
+            let mut command = Command::new("cargo");
+            super::append_web_flags(
+                &mut command,
+                encoded.map(OsString::from),
+                plain.map(OsString::from),
+            );
+            assert_eq!(
+                command
+                    .get_envs()
+                    .find(|(name, _)| *name == key)
+                    .unwrap()
+                    .1
+                    .unwrap(),
+                expected
+            );
+        }
+        let mut command = Command::new("cargo");
+        super::append_web_flags(&mut command, None, None);
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args[0], "--config");
+        assert!(args[1].to_str().unwrap().contains("getrandom_backend"));
+        assert!(command.get_envs().next().is_none());
+    }
+
+    #[test]
     fn gpui_runtimes_are_built_for_this_machine() {
         assert_eq!(Platform::Gpui.dir(), "gpui");
         assert_eq!(Platform::Gpui.triple(), None);
         assert_eq!(Platform::Gpui.binary(false), "nsh-gpui-host");
-        assert_eq!(Platform::Gpui.binary(true), "nsh-gpui-app");
         assert_eq!(
-            Platform::Gpui.file_name(true),
-            format!("nsh-gpui-app{}", std::env::consts::EXE_SUFFIX)
+            Platform::Gpui.file_name(false),
+            format!("nsh-gpui-host{}", std::env::consts::EXE_SUFFIX)
         );
         assert_eq!(Platform::Gpui.host(false), "the development host for GPUI");
     }

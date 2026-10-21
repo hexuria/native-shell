@@ -24,9 +24,9 @@ use super::{
 /// JS (or from the component whose view has it), its events go to JS.
 /// `#[component]` on a function makes the type and this impl.
 ///
-/// It is registered under its type's name ([`std::any::type_name`]:
-/// `nsh_ui_mobile::button::Button`) and exported to JS as the type's own
-/// name (`Button`), so neither is written by hand
+/// It is registered under its type's full path ([`std::any::type_name`]:
+/// its crate, modules and name) and exported to JS as the type's own name
+/// (the last segment), so neither is written by hand
 /// ([`Registry::register`]).
 ///
 /// ```ignore
@@ -35,8 +35,8 @@ use super::{
 ///     view()
 ///         .px_4()
 ///         .py_3()
-///         .bg(move || theme().primary)
-///         .on_press(move |_: &()| cx.emit(ButtonEvent::Press))
+///         .bg(move || theme().primary()) // nsh-base's theme
+///         .on_press(move || cx.emit(ButtonEvent::Press))
 ///         .child(text(props.title))
 /// }
 /// ```
@@ -51,12 +51,19 @@ pub trait Component: 'static {
     /// registers (`Methods::of::<StepperApi>()`; none by default).
     const METHODS: Methods = Methods::NONE;
 
+    /// Its documentation in TypeScript: the `#[component]` function's doc
+    /// comment (none by default).
+    const DOC: &'static str = "";
+
     /// What it shows: its elements, with bindings where values change (TS:
     /// a component's body). Runs once, under an owner of its own: what it
     /// makes (signals, effects, timers) goes with the component.
     fn view(props: Self::Props, cx: super::Scope<Self::Event>) -> impl IntoElement;
 
-    /// This component inside another one's view.
+    /// This component inside another one's view, given all its props.
+    /// A `#[component]` has a constructor of its own, which Rust views use
+    /// (`button().disabled(..)`); this stays for components implemented
+    /// by hand and for code generic over components.
     fn element(props: Self::Props) -> ComponentElement<Self>
     where
         Self: Sized,
@@ -107,7 +114,8 @@ pub struct Method {
     /// Its parameters: JS names and TypeScript types.
     pub params: &'static [Param],
     /// The TypeScript type of its result (`None`: it returns nothing, and
-    /// JS does not wait for it).
+    /// JS gets `undefined`: the call runs in order with the props set
+    /// before it, with nothing to wait for).
     pub returns: Option<TsType>,
     /// The classes its parameters and result name.
     pub refs: super::ClassRefs,
@@ -180,10 +188,20 @@ pub struct MethodSpec {
     pub doc: &'static str,
     /// Its parameters: JS names and TypeScript types.
     pub params: Vec<(&'static str, String)>,
-    /// The TypeScript type of its result; `None`: nothing to wait for.
+    /// The TypeScript type of its result; `None`: nothing (`void`).
     pub returns: Option<String>,
     /// Its call (the arguments converted in the JS call).
     pub call: fn(&dyn JsHost) -> Result<MethodCall, Thrown>,
+}
+
+impl MethodSpec {
+    /// Whether JS gets a `Promise` of the result: when the method returns
+    /// a value (`Result<(), E>` too, rejected with an `Err`). One
+    /// returning `()` gives `undefined` (`void`): the call runs in order
+    /// with the UI and nothing answers it, and a wrong argument throws.
+    pub fn promises(&self) -> bool {
+        self.returns.is_some()
+    }
 }
 
 /// What a prop is to the glue.
@@ -192,6 +210,10 @@ pub enum PropKind {
     /// A value: decoded in the JS call ([`PropSpec::decode`]), set by the
     /// core.
     Value,
+    /// A render function (`Option<Renderer<T>>`): decoded in the JS call
+    /// as a value is (a function, or none), its content rendered by JS
+    /// when the core asks for it ([`super::JsEvent::Render`]).
+    Renderer,
     /// A named slot: JSX in a holder node.
     Slot,
     /// The JSX children.
@@ -228,6 +250,9 @@ pub struct PropSpec {
 pub struct EventSpec {
     /// Its name (`press`: the handler is `onPress`).
     pub name: &'static str,
+    /// The name of the handler's argument in TypeScript (`value`, or what
+    /// `#[args(..)]` on the variant says; unused without data).
+    pub arg: &'static str,
     /// The TypeScript type of its data (`void` for none).
     pub data: String,
     /// Documentation.
@@ -244,9 +269,6 @@ pub trait Props: Clone + PartialEq + 'static {
     /// (`#[prop(lazy)]`).
     #[doc(hidden)]
     const LAZY_CHILDREN: bool = false;
-
-    /// The component's documentation (the struct's doc comment).
-    fn doc() -> &'static str;
 
     /// The props (their named types declared in `types`).
     fn spec(types: &mut TsTypes) -> Vec<PropSpec>;
@@ -286,10 +308,6 @@ pub trait Props: Clone + PartialEq + 'static {
 
 /// The props of a component that has none (an app's root, say).
 impl Props for () {
-    fn doc() -> &'static str {
-        ""
-    }
-
     fn spec(_: &mut TsTypes) -> Vec<PropSpec> {
         Vec::new()
     }
@@ -309,7 +327,12 @@ impl Props for () {
     }
 }
 
-/// A component's events. Derive it: `#[derive(Event)]`.
+/// A component's events. Derive it: `#[derive(Event)]`. The element of a
+/// `#[component]` emitting them gets a listener method per event, named
+/// as its TSX handler in snake case (`onPress` is `.on_press(..)`): a
+/// unit variant's takes `move || ..`, a one-field variant's the value
+/// (`move |index: &u32| ..`), a named-field variant's the event itself
+/// ([`ComponentBuilder`](super::ComponentBuilder)).
 pub trait Event: 'static {
     /// The events (their named types declared in `types`).
     fn spec(types: &mut TsTypes) -> Vec<EventSpec>;
@@ -343,10 +366,10 @@ impl Event for NoEvent {
 /// from it ([`declarations`]).
 #[derive(Debug, Clone)]
 pub struct ComponentSpec {
-    /// Its registered name: its type's ([`std::any::type_name`]:
-    /// `nsh_ui_mobile::button::Button`), unique within one binary.
+    /// Its registered name: its type's full path ([`std::any::type_name`]),
+    /// unique within one binary.
     pub name: &'static str,
-    /// Its JS export: the type's own name (`Button`).
+    /// Its JS export: the type's own name, the last segment of its path.
     pub export: String,
     /// Documentation.
     pub doc: &'static str,
@@ -374,7 +397,7 @@ impl ComponentSpec {
         Self {
             name,
             export: export_name(name).to_owned(),
-            doc: C::Props::doc(),
+            doc: C::DOC,
             props,
             events,
             methods,
@@ -388,6 +411,14 @@ impl ComponentSpec {
         self.props
             .iter()
             .filter(|p| p.kind == PropKind::Slot)
+            .map(|p| p.name)
+    }
+
+    /// Its render functions ([`PropKind::Renderer`]).
+    pub fn renderers(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.props
+            .iter()
+            .filter(|p| p.kind == PropKind::Renderer)
             .map(|p| p.name)
     }
 
@@ -420,9 +451,8 @@ pub(crate) fn name_of<C: Component>() -> &'static str {
     std::any::type_name::<C>()
 }
 
-/// A type's own name, its JS export: `nsh_ui_mobile::tab_bar::TabBar` ->
-/// `TabBar` (a generic one's without its arguments: `app::Picker<app::Fruit>`
-/// -> `Picker`).
+/// A type's own name, its JS export: the last segment of its path, without
+/// a generic type's arguments (the test `components_are_named_after_their_types`).
 fn export_name(type_name: &str) -> &str {
     let path = type_name.split('<').next().unwrap_or(type_name);
     path.rsplit("::").next().unwrap_or(path)
@@ -463,9 +493,11 @@ pub(crate) trait AnyInstance {
 #[derive(Clone)]
 pub struct Root {
     make: Arc<dyn Fn() -> super::AnyElement + Send + Sync>,
-    theme: Option<Arc<super::Theme>>,
+    tokens: Option<Arc<super::Tokens>>,
     fonts: Vec<Arc<[u8]>>,
     appearance: Option<crate::platform::Appearance>,
+    app_id: Option<String>,
+    status_bar: Option<crate::StatusBarSetting>,
 }
 
 impl Root {
@@ -473,15 +505,30 @@ impl Root {
     pub fn new<C: Component>(props: impl Fn() -> C::Props + Send + Sync + 'static) -> Self {
         Self {
             make: Arc::new(move || super::IntoElement::into_element(C::element(props()))),
-            theme: None,
+            tokens: None,
             fonts: Vec::new(),
             appearance: None,
+            app_id: None,
+            status_bar: None,
         }
     }
 
-    /// Renders with `theme` (by default the default one).
-    pub fn theme(mut self, theme: super::Theme) -> Self {
-        self.theme = Some(Arc::new(theme));
+    /// The app's id (`nsh.json` `"id"`, which nsh's generated code sets):
+    /// it names where the app keeps its data (`nsh/storage`).
+    pub fn app_id(mut self, id: impl Into<String>) -> Self {
+        self.app_id = Some(id.into());
+        self
+    }
+
+    /// The app's id ([`Root::app_id`]).
+    pub fn app_id_ref(&self) -> Option<&str> {
+        self.app_id.as_deref()
+    }
+
+    /// Renders with design tokens `tokens` (`nsh-base`'s theme's; by
+    /// default the UI sets' defaults).
+    pub fn tokens(mut self, tokens: super::Tokens) -> Self {
+        self.tokens = Some(Arc::new(tokens));
         self
     }
 
@@ -500,15 +547,27 @@ impl Root {
         self
     }
 
+    /// The status bar's default (`nsh.json` `"statusBar"`), under what
+    /// pages and dialogs set (`Screen::status_bar`, `Modal::status_bar`).
+    pub fn status_bar(mut self, setting: crate::StatusBarSetting) -> Self {
+        self.status_bar = Some(setting);
+        self
+    }
+
+    /// The status bar's default ([`Root::status_bar`]).
+    pub fn status_bar_ref(&self) -> Option<crate::StatusBarSetting> {
+        self.status_bar
+    }
+
     /// The appearance it starts in ([`Root::appearance`]; `None`: the
     /// system's).
     pub fn appearance_ref(&self) -> Option<crate::platform::Appearance> {
         self.appearance
     }
 
-    /// The theme it renders with.
-    pub fn theme_ref(&self) -> Option<&super::Theme> {
-        self.theme.as_deref()
+    /// The design tokens it renders with.
+    pub fn tokens_ref(&self) -> Option<&super::Tokens> {
+        self.tokens.as_deref()
     }
 
     /// The font files to register.
@@ -580,10 +639,12 @@ pub struct Registry {
     /// The runtime module the functions belong to (`nsh/android`): JS
     /// calls them as `nsh/android:Toast.show`, apart from any UI set's.
     namespace: Option<&'static str>,
-    /// The JS module a UI set is imported as (`nsh/ui/mobile`).
+    /// The JS module a UI set is imported as (`app/native`).
     ui_set: Option<&'static str>,
     /// The files its crates ship ([`Registry::assets`]).
     assets: Arc<Vec<&'static [super::AssetFile]>>,
+    /// Makes the design tokens of a theme ([`Registry::tokens_from`]).
+    tokens: Option<super::TokenSource>,
 }
 
 impl fmt::Debug for Registry {
@@ -771,6 +832,7 @@ impl Registry {
     pub fn merged(sets: &[Registry]) -> Self {
         let mut out = Self::default();
         for set in sets {
+            out.tokens = out.tokens.or(set.tokens);
             let types = Arc::make_mut(&mut out.types);
             for (name, ty) in set.types.iter() {
                 if let Some(old) = types.insert(name, ty.clone()) {
@@ -782,7 +844,7 @@ impl Registry {
     }
 
     /// The registry of a UI set apps import as `specifier`
-    /// (`nsh/ui/mobile`). An app's crate makes its own with
+    /// (`app/native`). An app's crate makes its own with
     /// `#[native_module("…")]`.
     pub fn ui_set(specifier: &'static str) -> Self {
         Self {
@@ -803,7 +865,7 @@ impl Registry {
         (&self.reexports.0, &self.reexports.1)
     }
 
-    /// Exports `values` `nsh-js` makes for the set (`Stack`, `Screen`),
+    /// Exports `values` `nsh-js` makes for the set (`NavStack`, `NavPage`),
     /// declared by hand rather than generated from a spec.
     pub fn native_values(&mut self, values: &[&'static str]) -> &mut Self {
         Arc::make_mut(&mut self.native_values).extend_from_slice(values);
@@ -817,6 +879,20 @@ impl Registry {
     pub fn assets(&mut self, files: &'static [super::AssetFile]) -> &mut Self {
         Arc::make_mut(&mut self.assets).push(files);
         self
+    }
+
+    /// Makes the design tokens of the app's theme file, and the defaults
+    /// (`nsh-base`'s theme): the core reads `nsh.json`'s `"theme"` with it.
+    pub fn tokens_from(&mut self, source: super::TokenSource) -> &mut Self {
+        self.tokens = Some(source);
+        self
+    }
+
+    /// The tokens of theme file `json` (`None`: the defaults), by the
+    /// source a set brings ([`Registry::tokens_from`]; `None`: no set
+    /// does).
+    pub fn tokens(&self, json: Option<&str>) -> Option<Result<super::Tokens, String>> {
+        self.tokens.map(|source| source(json))
     }
 
     /// The files [`Registry::assets`] ships.
@@ -857,11 +933,92 @@ impl Registry {
         specs
     }
 
+    /// The module whose functions JS finds on the function `function` of
+    /// a flat module of the set: a module named like it
+    /// (`#[module(name = "test")]`: `test.skip`), as a module named like a
+    /// component is on the component.
+    pub fn function_members(&self, function: &str) -> Option<Arc<ModuleSpec>> {
+        let exported = self.modules.values().any(|m| {
+            m.spec.flat
+                && m.spec
+                    .functions
+                    .iter()
+                    .any(|f| !f.getter && f.name == function)
+        });
+        exported
+            .then(|| {
+                self.modules
+                    .values()
+                    .find(|m| !m.spec.flat && m.spec.name == function)
+                    .map(|m| m.spec.clone())
+            })
+            .flatten()
+    }
+
     /// The registered components, by export.
     pub fn specs(&self) -> Vec<Arc<ComponentSpec>> {
         let mut specs: Vec<_> = self.types.values().map(|t| t.spec.clone()).collect();
         specs.sort_by(|a, b| a.export.cmp(&b.export).then(a.name.cmp(b.name)));
         specs
+    }
+
+    /// The exports of the set that TS sees without documentation, by
+    /// their TS names (`Gauge`, `Gauge.max`, `Gauge.onChange`,
+    /// `Ledger.copy`, `new Account`, `Account.balance`): what to give a
+    /// doc comment. A component is documented by its `#[component]`
+    /// function, a module or class by its struct, the rest by their own
+    /// (a setter needs none beside its getter's; a module merged into a
+    /// component or a function of its name, or exported flat, by that
+    /// component or function, or its functions).
+    pub fn undocumented(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let specs = self.specs();
+        for c in &specs {
+            if c.doc.is_empty() {
+                out.push(c.export.clone());
+            }
+            for p in c.props.iter().filter(|p| p.doc.is_empty()) {
+                out.push(format!("{}.{}", c.export, p.name));
+            }
+            for e in c.events.iter().filter(|e| e.doc.is_empty()) {
+                out.push(format!("{}.{}", c.export, handler_name(e.name)));
+            }
+            for m in c.methods.iter().filter(|m| m.doc.is_empty()) {
+                out.push(format!("{}.{}", c.export, m.name));
+            }
+        }
+        for m in self.module_specs() {
+            let merged = specs.iter().any(|c| c.export == m.name)
+                || (!m.flat && self.function_members(m.name).is_some());
+            if m.doc.is_empty() && !merged && !m.flat {
+                out.push(m.name.to_owned());
+            }
+            for f in m.functions.iter().filter(|f| f.doc.is_empty()) {
+                out.push(if m.flat {
+                    f.name.to_owned()
+                } else {
+                    format!("{}.{}", m.name, f.name)
+                });
+            }
+        }
+        for c in self.class_specs() {
+            if c.doc.is_empty() {
+                out.push(c.name.to_owned());
+            }
+            let documented_getter = |name: &str| {
+                c.members
+                    .iter()
+                    .any(|m| m.kind == MemberKind::Getter && m.name == name && !m.doc.is_empty())
+            };
+            for m in c.members.iter().filter(|m| m.doc.is_empty()) {
+                match m.kind {
+                    MemberKind::Constructor => out.push(format!("new {}", c.name)),
+                    MemberKind::Setter if documented_getter(m.name) => {}
+                    _ => out.push(format!("{}.{}", c.name, m.name)),
+                }
+            }
+        }
+        out
     }
 
     /// A new instance of component `name`.
@@ -906,7 +1063,7 @@ fn same_class(name: &str, old: &str, new: &str, set: Option<&str>) -> String {
     }
 }
 
-/// ` in `nsh/ui/mobile`` for a registry with a specifier.
+/// ` in `app/native`` for a registry with a specifier.
 fn of_set(set: Option<&str>) -> String {
     set.map(|s| format!(" in `{s}`")).unwrap_or_default()
 }
@@ -945,27 +1102,52 @@ pub fn declarations(registry: &Registry, omit: &[&str]) -> String {
         let _ = write!(out, "{declaration}\n\n");
     }
     let module_of = |name: &str| modules.iter().find(|m| m.name == name);
-    let signature = |f: &FunctionSpec| {
-        let params = f
-            .params
-            .iter()
-            .map(|(n, ts, optional)| format!("{n}{}: {ts}", if *optional { "?" } else { "" }))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let returns = match (&f.returns, f.kind) {
-            (Some(ts), super::module::FunctionKind::Sync) => ts.clone(),
-            (Some(ts), _) => format!("Promise<{ts}>"),
-            (None, _) => "void".to_owned(),
+    // A function's signatures: its own, or its overloads.
+    let signatures = |f: &FunctionSpec| {
+        let one = |params: &[(&str, String, bool)], returns: &Option<String>| {
+            let params = params
+                .iter()
+                .map(|(n, ts, optional)| format!("{n}{}: {ts}", if *optional { "?" } else { "" }))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let value = returns.clone().unwrap_or_else(|| "void".to_owned());
+            let returns = if f.promises() {
+                format!("Promise<{value}>")
+            } else {
+                value
+            };
+            (params, returns)
         };
-        (params, returns)
+        if f.overloads.is_empty() {
+            vec![one(&f.params, &f.returns)]
+        } else {
+            f.overloads
+                .iter()
+                .map(|(params, returns)| one(params, returns))
+                .collect()
+        }
     };
     // A module's object type.
     let module_object = |out: &mut String, m: &ModuleSpec| {
         out.push_str("{\n");
         for f in &m.functions {
-            doc(out, "  ", f.doc);
-            let (params, returns) = signature(f);
-            let _ = writeln!(out, "  {}({params}): {returns};", f.name);
+            for (params, returns) in signatures(f) {
+                doc(out, "  ", f.doc);
+                if f.getter {
+                    let _ = writeln!(out, "  readonly {}: {returns};", f.name);
+                    continue;
+                }
+                let _ = writeln!(out, "  {}({params}): {returns};", f.name);
+            }
+        }
+        for constant in &m.constants {
+            doc(out, "  ", constant.doc);
+            let _ = writeln!(
+                out,
+                "  readonly {}: {};",
+                constant.name,
+                constant.value.ts_type()
+            );
         }
         out.push('}');
     };
@@ -1024,7 +1206,7 @@ pub fn declarations(registry: &Registry, omit: &[&str]) -> String {
             let arg = if e.data == "void" {
                 String::new()
             } else {
-                format!("data: {}", e.data)
+                format!("{}: {}", e.arg, e.data)
             };
             let _ = writeln!(out, "  {handler}?: ({arg}) => void;");
         }
@@ -1046,18 +1228,70 @@ pub fn declarations(registry: &Registry, omit: &[&str]) -> String {
         );
     }
     for m in &modules {
-        if specs.iter().any(|s| s.export == m.name) {
+        if specs.iter().any(|s| s.export == m.name)
+            || (!m.flat && registry.function_members(m.name).is_some())
+        {
             continue;
         }
         if m.flat {
-            for f in m.functions.iter().filter(|f| !omit.contains(&f.name)) {
-                doc(&mut out, "", f.doc);
-                let (params, returns) = signature(f);
-                let _ = write!(
-                    out,
-                    "export declare function {}({params}): {returns};\n\n",
-                    f.name
-                );
+            for f in m
+                .functions
+                .iter()
+                .filter(|f| !f.getter && !omit.contains(&f.name))
+            {
+                for (params, returns) in signatures(f) {
+                    doc(&mut out, "", f.doc);
+                    let _ = writeln!(
+                        out,
+                        "export declare function {}({params}): {returns};",
+                        f.name
+                    );
+                }
+                // A module of its name: its functions on the function.
+                if let Some(members) = registry.function_members(f.name) {
+                    let _ = writeln!(out, "export declare namespace {} {{", f.name);
+                    for member in &members.functions {
+                        for (params, returns) in signatures(member) {
+                            doc(&mut out, "  ", member.doc);
+                            let _ = if member.getter {
+                                writeln!(out, "  const {}: {returns};", member.name)
+                            } else {
+                                writeln!(out, "  function {}({params}): {returns};", member.name)
+                            };
+                        }
+                    }
+                    for constant in &members.constants {
+                        doc(&mut out, "  ", constant.doc);
+                        let _ = writeln!(
+                            out,
+                            "  const {}: {};",
+                            constant.name,
+                            constant.value.ts_type()
+                        );
+                    }
+                    out.push_str("}\n");
+                }
+                out.push('\n');
+            }
+            for constant in &m.constants {
+                if !omit.contains(&constant.name) {
+                    doc(&mut out, "", constant.doc);
+                    let _ = writeln!(
+                        out,
+                        "export declare const {}: {};\n",
+                        constant.name,
+                        constant.value.ts_type()
+                    );
+                }
+            }
+            if m.default && !omit.contains(&"default") {
+                let _ = write!(out, "declare const defaultExport: ");
+                module_object(&mut out, m);
+                // The registry's values `nsh-js` makes are on the object too.
+                for native in registry.native_value_names() {
+                    let _ = write!(out, " & {{ {native}: typeof {native} }}");
+                }
+                out.push_str(";\nexport default defaultExport;\n\n");
             }
             continue;
         }
@@ -1068,6 +1302,13 @@ pub fn declarations(registry: &Registry, omit: &[&str]) -> String {
         if !omit.contains(&m.name) {
             doc(&mut out, "", m.doc);
             let _ = write!(out, "export declare const {0}: {0}Module;\n\n", m.name);
+        }
+        if m.default && !omit.contains(&"default") {
+            let _ = write!(
+                out,
+                "declare const defaultExport: {}Module;\nexport default defaultExport;\n\n",
+                m.name
+            );
         }
     }
     for c in classes.iter().filter(|c| !omit.contains(&c.name)) {
@@ -1085,24 +1326,76 @@ fn class_declaration(out: &mut String, c: &ClassSpec) {
         }
     };
     doc(out, "", c.doc);
+    if c.def.interface {
+        // No value: what its objects have.
+        let _ = writeln!(out, "export interface {} {{", c.name);
+        for m in &c.members {
+            let params = m
+                .params
+                .iter()
+                .map(|(n, ts, optional)| format!("{n}{}: {ts}", if *optional { "?" } else { "" }))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let value = m.returns.clone().unwrap_or_else(|| "void".to_owned());
+            let returns = if m.is_async {
+                format!("Promise<{value}>")
+            } else {
+                value
+            };
+            doc(out, "  ", m.doc);
+            let has_setter = |name| {
+                c.members
+                    .iter()
+                    .any(|s| s.kind == MemberKind::Setter && s.name == name)
+            };
+            let _ = match m.kind {
+                MemberKind::Method => writeln!(out, "  {}({params}): {returns};", m.name),
+                MemberKind::Getter if has_setter(m.name) => {
+                    writeln!(out, "  {}: {returns};", m.name)
+                }
+                MemberKind::Getter => writeln!(out, "  readonly {}: {returns};", m.name),
+                // A setter's property is its getter's; constructors and
+                // statics belong to a class value it has none of.
+                _ => Ok(()),
+            };
+        }
+        out.push_str("}\n\n");
+        return;
+    }
     let _ = writeln!(out, "export declare class {} {{", c.name);
     if !c.members.iter().any(|m| m.kind == MemberKind::Constructor) {
         out.push_str("  /** Made by the class's members only. */\n  private constructor();\n");
     }
-    for m in &c.members {
-        doc(out, "  ", m.doc);
-        let params = m
-            .params
+    let one = |m: &super::MemberSpec, params: &[(&str, String, bool)], returns: &Option<String>| {
+        let params = params
             .iter()
             .map(|(n, ts, optional)| format!("{n}{}: {ts}", if *optional { "?" } else { "" }))
             .collect::<Vec<_>>()
             .join(", ");
-        let value = m.returns.clone().unwrap_or_else(|| "void".to_owned());
+        let value = returns.clone().unwrap_or_else(|| "void".to_owned());
         let returns = if m.is_async {
             format!("Promise<{value}>")
         } else {
             value
         };
+        (params, returns)
+    };
+    for m in &c.members {
+        if !m.overloads.is_empty() {
+            for (params, returns) in &m.overloads {
+                doc(out, "  ", m.doc);
+                let (params, returns) = one(m, params, returns);
+                let _ = match m.kind {
+                    MemberKind::Static => {
+                        writeln!(out, "  static {}({params}): {returns};", m.name)
+                    }
+                    _ => writeln!(out, "  {}({params}): {returns};", m.name),
+                };
+            }
+            continue;
+        }
+        doc(out, "  ", m.doc);
+        let (params, returns) = one(m, &m.params, &m.returns);
         let _ = match m.kind {
             MemberKind::Constructor => writeln!(out, "  constructor({params});"),
             MemberKind::Method => writeln!(out, "  {}({params}): {returns};", m.name),
@@ -1159,6 +1452,7 @@ mod tests {
         Change {
             new_value: f64,
         },
+        #[args(limit)]
         Limit(u32),
         Reset,
     }
@@ -1168,12 +1462,18 @@ mod tests {
     #[methods]
     impl StepperApi {
         /// Jumps to `value`.
-        fn jump_to(&self, value: f64) {
+        pub(crate) fn jump_to(&self, value: f64) {
             let _ = value;
         }
 
-        fn value(&self) -> f64 {
+        pub(crate) fn value(&self) -> f64 {
             0.0
+        }
+
+        /// A helper without `pub`: not a method of the ref.
+        #[allow(dead_code)]
+        fn clamp(&self, value: f64) -> f64 {
+            value
         }
     }
 
@@ -1181,6 +1481,7 @@ mod tests {
         type Props = StepperProps;
         type Event = StepperEvent;
         const METHODS: Methods = Methods::of::<StepperApi>();
+        const DOC: &'static str = "Picks a number.";
 
         fn view(_: StepperProps, _: super::super::Scope<StepperEvent>) -> impl IntoElement {
             view()
@@ -1199,8 +1500,8 @@ mod tests {
             "  maxValue?: number | null;",
             "  /** Above the control. */\n  label?: JSX.Element;",
             "  children?: JSX.Element;",
-            "  /** The value changed. */\n  onChange?: (data: { newValue: number }) => void;",
-            "  onLimit?: (data: number) => void;",
+            "  /** The value changed. */\n  onChange?: (event: { newValue: number }) => void;",
+            "  onLimit?: (limit: number) => void;",
             "  onReset?: () => void;",
             "/** Picks a number. */",
             "export interface StepperRef {",
@@ -1211,6 +1512,8 @@ mod tests {
         ] {
             assert!(ts.contains(line), "missing {line:?} in\n{ts}");
         }
+        assert!(!ts.contains("clamp"), "a helper is not a method:\n{ts}");
+        assert_eq!(StepperApi::METHODS.len(), 2);
         let mut props = StepperProps::initial();
         let size = |json| {
             let specs = StepperProps::spec(&mut TsTypes::default());
@@ -1245,23 +1548,46 @@ mod tests {
         assert_eq!(StepperEvent::Reset.name(), "reset");
     }
 
+    #[test]
+    fn exports_without_docs_are_listed() {
+        let mut registry = Registry::new();
+        registry.register::<Stepper>();
+        // `size`, `maxValue`, `children`, `onLimit`, `onReset` and the
+        // ref's `value` have no doc comment.
+        assert_eq!(
+            registry.undocumented(),
+            [
+                "Stepper.size",
+                "Stepper.maxValue",
+                "Stepper.children",
+                "Stepper.onLimit",
+                "Stepper.onReset",
+                "Stepper.value",
+            ]
+        );
+        let mut r = Registry::ui_set("test/maker");
+        r.module::<Maker>();
+        assert_eq!(r.undocumented(), ["Maker.make", "new Lonely"]);
+    }
+
     /// A class no set registers.
     #[crate::ui::class]
     struct Lonely;
 
     #[crate::ui::class]
     impl Lonely {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Lonely
         }
     }
 
     /// Makes a `Lonely`.
+    #[crate::ui::module]
     struct Maker;
 
     #[crate::ui::module]
     impl Maker {
-        fn make() -> Instance<Lonely> {
+        pub(crate) fn make() -> Instance<Lonely> {
             Instance::new(Lonely)
         }
     }
@@ -1281,6 +1607,94 @@ mod tests {
         r.class::<Lonely>();
         assert_eq!(r.class_specs().len(), 1);
         let _ = Registry::merged(&[r]);
+    }
+
+    /// Checks.
+    #[crate::ui::module]
+    struct Checks;
+
+    #[crate::ui::module(flat)]
+    impl Checks {
+        /// Declares a check.
+        pub(crate) fn check(name: String) {
+            let _ = name;
+        }
+    }
+
+    /// Unused: a module's doc when its functions are on `check`.
+    #[crate::ui::module]
+    struct CheckVariants;
+
+    #[crate::ui::module(name = "check")]
+    impl CheckVariants {
+        /// How many variants there are.
+        pub(crate) const COUNT: u32 = 2;
+
+        /// Declares a check that does not run.
+        pub(crate) fn skip(name: String) {
+            let _ = name;
+        }
+
+        pub(crate) fn todo(name: String) {
+            let _ = name;
+        }
+    }
+
+    /// Named like no function of the set: an object of its own.
+    #[crate::ui::module]
+    struct Loose;
+
+    #[crate::ui::module(name = "loose")]
+    impl Loose {
+        /// Nothing.
+        pub(crate) fn nothing() {}
+    }
+
+    #[test]
+    fn a_module_named_like_a_function_puts_its_functions_on_it() {
+        let mut r = Registry::ui_set("test/checks");
+        r.module::<Checks>()
+            .module::<CheckVariants>()
+            .module::<Loose>();
+        assert_eq!(r.function_members("check").unwrap().name, "check");
+        assert!(r.function_members("loose").is_none());
+        let ts = declarations(&r, &[]);
+        assert!(
+            ts.contains(
+                "/** Declares a check. */\n\
+                 export declare function check(name: string): void;\n\
+                 export declare namespace check {\n  \
+                 /** Declares a check that does not run. */\n  \
+                 function skip(name: string): void;\n  \
+                 function todo(name: string): void;\n  \
+                 /** How many variants there are. */\n  \
+                 const COUNT: number;\n}\n"
+            ),
+            "{ts}"
+        );
+        assert!(
+            !ts.contains("CheckVariants") && !ts.contains("checkModule"),
+            "{ts}"
+        );
+        assert!(
+            ts.contains("export declare const loose: looseModule;"),
+            "{ts}"
+        );
+        // The members are documented as the function's.
+        assert_eq!(r.undocumented(), ["check.todo"]);
+        let described = super::super::description::SetDescription::of(&r).unwrap();
+        let exports: Vec<_> = described
+            .exports
+            .iter()
+            .map(|e| (e.name.as_str(), e.kind))
+            .collect();
+        assert_eq!(
+            exports,
+            [
+                ("check", super::super::description::ExportKind::Function),
+                ("loose", super::super::description::ExportKind::Module)
+            ]
+        );
     }
 
     mod clash {

@@ -10,12 +10,12 @@ mod gestures;
 mod images;
 mod lists;
 mod media;
-mod mobile_ui;
 mod navigation;
 mod photos;
 mod physics;
 mod scrolling;
 mod stocks;
+mod storage;
 mod styles;
 mod system;
 mod text_demo;
@@ -23,11 +23,15 @@ mod typed_styles;
 
 use std::rc::Rc;
 
+use nsh_base::nav_page;
 use nsh_core::ui::{AnyElement, Screen, prelude::*};
 
 use crate::{
     nav::{self, Route},
-    ui::{IconName, IconTile, MONO, PressProps, appear, colors, header, icon, press_with, radius},
+    ui::{
+        IconName, IconTile, MONO, PageHeader, appear, colors, header, icon, press, radius, titled,
+        with_header,
+    },
 };
 
 /// A demo of the index: its name, what it shows, its icon and its
@@ -55,8 +59,7 @@ impl Demo {
         Route {
             key: self.key().into(),
             screen: Rc::new(move || {
-                header(screen().title(name))
-                    .child(view().flex_1().bg(colors::BACKGROUND).child(content()))
+                titled(name).child(view().flex_1().bg(colors::BACKGROUND).child(content()))
             }),
         }
     }
@@ -83,19 +86,19 @@ pub(crate) static GROUPS: &[Group] = &[
                 name: "Stocks",
                 detail: "A live watchlist and a stock: candles, depth, the tape, a tick every 50 ms",
                 icon: IconName::Stocks,
-                content: || stocks::Stocks::element(()).into_element(),
+                content: || stocks::stocks().into_element(),
             },
             Demo {
                 name: "AI Chat",
                 detail: "Streaming replies, tools, reasoning, attachments, errors",
                 icon: IconName::Chat,
-                content: || chat::Chat::element(()).into_element(),
+                content: || chat::chat().into_element(),
             },
             Demo {
                 name: "Photos",
                 detail: "A long recycled list: images, pull to refresh, paging",
                 icon: IconName::Photos,
-                content: || photos::Photos::element(()).into_element(),
+                content: || photos::photos().into_element(),
             },
         ],
     },
@@ -106,25 +109,25 @@ pub(crate) static GROUPS: &[Group] = &[
                 name: "Lists",
                 detail: "Columns, sticky sections, a chat, horizontal lists",
                 icon: IconName::Lists,
-                content: || lists::Lists::element(()).into_element(),
+                content: || lists::lists().into_element(),
             },
             Demo {
                 name: "Scrolling",
                 detail: "Paging, snapping, zoom, scroll events, prepending, keyboard taps",
                 icon: IconName::Scroll,
-                content: || scrolling::Scrolling::element(()).into_element(),
+                content: || scrolling::scrolling().into_element(),
             },
             Demo {
                 name: "Navigation",
                 detail: "Header options, modals, the back button, safe areas",
                 icon: IconName::Nav,
-                content: || navigation::Navigation::element(()).into_element(),
+                content: || navigation::navigation().into_element(),
             },
             Demo {
                 name: "Form",
                 detail: "Inputs, keyboard types, the keyboard over the content",
                 icon: IconName::Form,
-                content: || form::Form::element(()).into_element(),
+                content: || form::form().into_element(),
             },
         ],
     },
@@ -135,25 +138,25 @@ pub(crate) static GROUPS: &[Group] = &[
                 name: "File drops",
                 detail: "Desktop file URLs, destination entry and exit",
                 icon: IconName::Gestures,
-                content: || file_drop::FileDrop::element(()).into_element(),
+                content: || file_drop::file_drop().into_element(),
             },
             Demo {
                 name: "Gestures",
                 detail: "Pinch, rotate, press states, hit slop, pointer events",
                 icon: IconName::Gestures,
-                content: || gestures::Gestures::element(()).into_element(),
+                content: || gestures::gestures().into_element(),
             },
             Demo {
                 name: "Physics",
                 detail: "Drags and springs on the UI thread",
                 icon: IconName::Physics,
-                content: || physics::Physics::element(()).into_element(),
+                content: || physics::physics().into_element(),
             },
             Demo {
                 name: "Animations",
                 detail: "Easing, sequence / parallel / stagger / loop, springs, interpolation",
                 icon: IconName::Animation,
-                content: || animations::Animations::element(()).into_element(),
+                content: || animations::animations().into_element(),
             },
         ],
     },
@@ -164,31 +167,31 @@ pub(crate) static GROUPS: &[Group] = &[
                 name: "Canvas",
                 detail: "2D context: paths, gradients, text, images, native animation",
                 icon: IconName::Canvas,
-                content: || canvas::CanvasDemo::element(()).into_element(),
+                content: || canvas::canvas_demo().into_element(),
             },
             Demo {
                 name: "Styles",
                 detail: "Corners, borders, shadows, clipping, 3D transforms",
                 icon: IconName::Styles,
-                content: || styles::Styles::element(()).into_element(),
+                content: || styles::styles().into_element(),
             },
             Demo {
                 name: "Typed styles",
                 detail: "Tailwind's utilities as typed methods: variants, grid, shadows, motion",
                 icon: IconName::Tailwind,
-                content: || typed_styles::TypedStyles::element(()).into_element(),
+                content: || typed_styles::typed_styles().into_element(),
             },
             Demo {
                 name: "Text",
                 detail: "Fonts, spans, inline views and images, decorations, truncation, languages",
                 icon: IconName::Text,
-                content: || text_demo::TextDemo::element(()).into_element(),
+                content: || text_demo::text_demo().into_element(),
             },
             Demo {
                 name: "Images",
                 detail: "Resize modes, tint, GIF / WebP, placeholders, blur, fade",
                 icon: IconName::Image,
-                content: || images::Images::element(()).into_element(),
+                content: || images::images().into_element(),
             },
         ],
     },
@@ -196,28 +199,28 @@ pub(crate) static GROUPS: &[Group] = &[
         title: "Platform",
         demos: &[
             Demo {
-                name: "Mobile UI",
-                detail: "nsh/ui/mobile in Rust: a ListView and a Group of the app's rows",
-                icon: IconName::Mobile,
-                content: || mobile_ui::MobileUi::element(()).into_element(),
-            },
-            Demo {
                 name: "Components",
                 detail: "Press feedback, sheet, layout animation, input accessory, modal options",
                 icon: IconName::Components,
-                content: || components::Components::element(()).into_element(),
+                content: || components::components().into_element(),
             },
             Demo {
                 name: "Web and video",
                 detail: "WKWebView / WebView, AVPlayer / MediaPlayer",
                 icon: IconName::Media,
-                content: || media::Media::element(()).into_element(),
+                content: || media::media().into_element(),
             },
             Demo {
                 name: "System",
                 detail: "Status bar, alerts, action sheets, environment, timers, HTTP",
                 icon: IconName::System,
-                content: || system::System::element(()).into_element(),
+                content: || system::system().into_element(),
+            },
+            Demo {
+                name: "Storage",
+                detail: "Storage from Rust: a launch count, a note saved as you type, the stored keys",
+                icon: IconName::Storage,
+                content: || storage::storage_demo().into_element(),
             },
         ],
     },
@@ -226,43 +229,44 @@ pub(crate) static GROUPS: &[Group] = &[
 /// A demo's row of the index: a tap pushes its screen.
 fn demo_row(demo: &'static Demo, first: bool) -> AnyElement {
     let open = move |_: &()| nav::push_route(demo.route());
-    press_with(
-        PressProps {
-            scale: 0.98.into(),
-            label: Some(demo.name.into()).into(),
-            ..PressProps::default()
-        },
-        open,
-    )
-    .child(
-        view()
-            .flex_row()
-            .items_center()
-            .gap(px(14.0))
-            .p_3()
-            .when(!first, |v| v.border_t_1().border_t_color(colors::LINE))
-            .child(IconTile::new(demo.icon).size(38.0))
-            .child(
-                view()
-                    .flex_1()
-                    .gap(px(2.0))
-                    .child(
-                        text(demo.name)
-                            .text_size(px(16.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(colors::TEXT),
-                    )
-                    .child(
-                        text(demo.detail)
-                            .number_of_lines(2)
-                            .text_size(px(13.0))
-                            .line_height(px(18.0))
-                            .text_color(colors::MUTED),
-                    ),
-            )
-            .child(icon(IconName::Chevron, 16.0, colors::FAINT)),
-    )
-    .into_element()
+    press()
+        .scale(0.98)
+        .label(demo.name)
+        .on_press(open)
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(px(14.0))
+                .p_3()
+                .when(!first, |v| v.border_t_1().border_t_color(colors::LINE))
+                .child(IconTile::new(demo.icon).size(38.0))
+                .child(
+                    view()
+                        .flex_1()
+                        .gap(px(2.0))
+                        .child(
+                            text(demo.name)
+                                .text_size(px(16.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(colors::TEXT),
+                        )
+                        .child(
+                            text(demo.detail)
+                                .number_of_lines(2)
+                                .text_size(px(13.0))
+                                .line_height(px(18.0))
+                                .text_color(colors::MUTED),
+                        ),
+                )
+                .child(
+                    icon()
+                        .name(IconName::Chevron)
+                        .size(16.0)
+                        .tint(colors::FAINT),
+                ),
+        )
+        .into_element()
 }
 
 /// The index: the demos by group; a tap pushes one.
@@ -277,7 +281,8 @@ pub(crate) fn index() -> Screen {
                 .enumerate()
                 .map(|(i, demo)| demo_row(demo, i == 0))
                 .collect();
-            appear(g as u32 + 1)
+            appear()
+                .index(g as u32 + 1)
                 .child(
                     view()
                         .gap_2()
@@ -292,7 +297,7 @@ pub(crate) fn index() -> Screen {
                                         .text_size(px(13.0))
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(colors::MUTED)
-                                        .letter_spacing(0.4),
+                                        .letter_spacing(px(0.4)),
                                 )
                                 .child(
                                     text(group.demos.len().to_string())
@@ -315,7 +320,11 @@ pub(crate) fn index() -> Screen {
                 .into_element()
         })
         .collect();
-    header(screen().key("index").title("Rust Gallery")).child(
+    with_header(
+        header(nav_page().key("index").title("Rust Gallery")),
+        || PageHeader::new("Rust Gallery").back(false),
+    )
+    .child(
         scroll()
             .flex_1()
             .bg(colors::BACKGROUND)

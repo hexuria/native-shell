@@ -1,12 +1,12 @@
 import { mount, signal, Text, View } from "nsh";
-import { createNativeValue } from "nsh/animated";
+import { createAnimatedValue } from "nsh/animated";
 import { PanResponder } from "nsh/gesture";
 import { tint, ui } from "./palette";
 
-/** A card dragged on the UI thread: `pan` drives two native values. */
+/** A card dragged on the UI thread: `pan` drives two animated values. */
 function DragCard() {
-  const x = createNativeValue(0);
-  const y = createNativeValue(0);
+  const x = createAnimatedValue(0);
+  const y = createAnimatedValue(0);
   const flings = signal(0);
   return (
     <View style={{ ...ui().inset, height: 150, borderRadius: 12, alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
@@ -81,11 +81,11 @@ function App() {
     <View style={{ flex: 1, backgroundColor: ui().page, padding: 16, paddingTop: 24, gap: 14 }}>
       <View style={{ flexDirection: "row", gap: 10 }}>
         <View
-          onPressIn={() => add("pressIn")}
-          onPressOut={() => add("pressOut")}
+          onPressDown={() => add("pressIn")}
+          onPressUp={() => add("pressOut")}
           onPress={() => add("press")}
           onLongPress={() => add("longPress")}
-          activeOpacity={0.5}
+          activeStyle={{ opacity: 0.5 }}
           style={{
             flex: 1,
             padding: 14,
@@ -94,14 +94,14 @@ function App() {
             alignItems: "center",
           }}
         >
-          <Text style={{ color: ui().onPrimary, fontWeight: "600" }}>activeOpacity</Text>
+          <Text style={{ color: ui().onPrimary, fontWeight: "600" }}>activeStyle opacity</Text>
         </View>
         <View
           onPress={() => add("underlay")}
-          underlayColor={ui().border}
+          activeStyle={{ backgroundColor: ui().border, backgroundImage: "none" }}
           style={{ ...ui().raised, flex: 1, padding: 14, borderRadius: 12, alignItems: "center" }}
         >
-          <Text style={{ color: ui().text, fontWeight: "600" }}>underlayColor</Text>
+          <Text style={{ color: ui().text, fontWeight: "600" }}>activeStyle background</Text>
         </View>
         <View
           onPress={() => add("active:")}

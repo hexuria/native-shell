@@ -1,11 +1,11 @@
 //! `PressRecognizer`: presses with React Native semantics in one gesture
-//! recognizer: `onPressIn` when the finger lands (later inside scroll
-//! views, where it may start a scroll), `onPressOut` when it lifts or
+//! recognizer: `onPressDown` when the finger lands (later inside scroll
+//! views, where it may start a scroll), `onPressUp` when it lifts or
 //! leaves, `onLongPress` after half a second, and `onPress` on release.
 //!
 //! It stays in the possible state while tracking and only recognizes on
 //! release, so scroll views and pans on the same touches win whenever they
-//! start first; it then fails and reports `onPressOut`.
+//! start first; it then fails and reports `onPressUp`.
 
 use std::cell::Cell;
 
@@ -18,13 +18,13 @@ use objc2::{
 use objc2_core_foundation::CGPoint;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSSet};
 use objc2_ui_kit::{
-    UIControl, UIEvent, UIGestureRecognizer, UIGestureRecognizerState, UIScrollView, UITouch,
-    UIView,
+    UIControl, UIEvent, UIGestureRecognizer, UIGestureRecognizerState, UIScrollView,
+    UITapGestureRecognizer, UITouch, UIView, UIWindow,
 };
 
 use crate::{target::EventTarget, text_view::TextView};
 
-/// Delay before `onPressIn` inside scroll views, so starting a scroll does
+/// Delay before `onPressDown` inside scroll views, so starting a scroll does
 /// not flash pressed states.
 const SCROLL_PRESS_DELAY: f64 = 0.13;
 /// How long a press must be held to become a long press (by default).
@@ -35,7 +35,7 @@ const RETENTION: f64 = 20.0;
 pub(crate) struct PressIvars {
     target: Retained<EventTarget>,
     start: Cell<CGPoint>,
-    /// `onPressIn` was reported.
+    /// `onPressDown` was reported.
     pressed: Cell<bool>,
     /// `onLongPress` fired: the release is not a press.
     long_pressed: Cell<bool>,
@@ -145,8 +145,13 @@ define_class!(
         }
 
         #[unsafe(method(canBePreventedByGestureRecognizer:))]
-        fn can_be_prevented(&self, _other: &UIGestureRecognizer) -> bool {
-            true
+        fn can_be_prevented(&self, other: &UIGestureRecognizer) -> bool {
+            // Taps UIKit attaches to the window skip `UIControl`s, and a
+            // press stands in for one: on iOS 26+ the window's top-edge tap
+            // interaction (`_UIDoubleTapInteraction`, top 64 pt, cancels
+            // touches, never simultaneous) would otherwise swallow every
+            // press near the top, such as a navigation bar's back button.
+            !is_window_tap(other)
         }
 
         #[unsafe(method(canPreventGestureRecognizer:))]
@@ -233,8 +238,8 @@ impl PressRecognizer {
         let target = &self.ivars().target;
         if let Some(link) = self.ivars().link.get() {
             let kind = match report {
-                Report::PressIn => EventKind::PressIn,
-                Report::PressOut => EventKind::PressOut,
+                Report::PressIn => EventKind::PressDown,
+                Report::PressOut => EventKind::PressUp,
                 Report::LongPress => EventKind::LongPress,
             };
             return target.link_event(&link, kind);
@@ -289,6 +294,16 @@ impl PressRecognizer {
         }
         false
     }
+}
+
+/// A tap recognizer UIKit attaches to a window (the top-edge tap
+/// interaction, keyboard dismissal): it ignores controls, so it must not
+/// prevent a press either. Edge-gesture gates are not taps and still do.
+fn is_window_tap(recognizer: &UIGestureRecognizer) -> bool {
+    recognizer.isKindOfClass(UITapGestureRecognizer::class())
+        && recognizer
+            .view()
+            .is_some_and(|view| view.isKindOfClass(UIWindow::class()))
 }
 
 fn inside_scroll_view(view: &UIView) -> bool {

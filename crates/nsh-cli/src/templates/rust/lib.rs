@@ -1,10 +1,12 @@
-//! The application's Rust UI, shared by the native and TSX entry points.
+//! The app's Rust UI: its root component, which `nsh run`, `nsh package`
+//! and `cargo run` mount.
 
 use nsh_core::ui::prelude::*;
-use nsh_ui_mobile::{Button, ButtonEvent, ButtonProps, SafeAreaView, SafeAreaViewProps};
+use nsh_base::{safe_area_view, theme};
 
-/// The components available to the TSX entry through `app/native`.
-#[native_module("app/native")]
+/// The app's UI set (`nsh.json` `"rust"`): what a TSX entry may import from
+/// `__SPECIFIER__` (`README.md`, "Adding a TSX entry").
+#[native_module("__SPECIFIER__")]
 fn native(registry: &mut Registry) {
     registry.register::<App>();
 }
@@ -15,10 +17,10 @@ pub fn App() -> impl IntoElement {
     let count = signal(0_u32);
     view()
         .flex_1()
-        .bg(move || theme().background)
-        .text_color(move || theme().foreground)
+        .bg(move || theme().background())
+        .text_color(move || theme().foreground())
         .child(
-            SafeAreaView::element(SafeAreaViewProps::default())
+            safe_area_view()
                 .flex_1()
                 .child(
                     view()
@@ -28,11 +30,18 @@ pub fn App() -> impl IntoElement {
                         .gap_4()
                         .child(text(move || format!("Count: {}", count.get())).text_size(px(28.0)))
                         .child(
-                            Button::element(ButtonProps {
-                                title: "Tap".into(),
-                                ..ButtonProps::default()
-                            })
-                            .on_event(move |_: &ButtonEvent| count.update(|value| *value += 1)),
+                            view()
+                                .px_5()
+                                .py_3()
+                                .rounded(px(10.0))
+                                .bg(move || theme().primary())
+                                .active(|s| s.opacity(0.6))
+                                .on_press(move || count.update(|value| *value += 1))
+                                .child(
+                                    text("Tap")
+                                        .text_size(px(17.0))
+                                        .text_color(move || theme().primary_foreground()),
+                                ),
                         ),
                 ),
         )

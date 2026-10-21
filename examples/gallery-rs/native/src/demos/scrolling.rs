@@ -4,14 +4,14 @@
 //! gallery's `demos/Scrolling.tsx`).
 
 use nsh_core::{
-    Rect,
+    Bounds, Points,
     ui::{View, prelude::*},
 };
 
 use crate::ui::{
-    Badge, Button, ButtonVariant, DemoPage, Figure, Finish, Finished, IconName, Meter, PressProps,
-    Section, Segment, Segmented, SegmentedEvent, SegmentedProps, SegmentedSize, ToggleEvent, Tone,
-    caption, code, colors, hint, press_with, radius, toggle,
+    Badge, Button, ButtonVariant, DemoPage, Figure, Finish, Finished, IconName, Meter, Section,
+    Segment, SegmentedElement, SegmentedSize, Tone, caption, code, colors, hint, lengths, press,
+    radius, segmented, toggle,
 };
 
 /// The tones cards, tiles and posts cycle through.
@@ -39,6 +39,8 @@ fn switch_row(
     value: impl Into<Prop<bool>>,
     on_change: impl Into<Listener<bool>>,
 ) -> View {
+    let on_change: Listener<bool> = on_change.into();
+    let value: Prop<bool> = value.into();
     view()
         .flex_row()
         .items_center()
@@ -54,12 +56,7 @@ fn switch_row(
                     note.map(|note| text(note).text_size(px(13.0)).text_color(colors::FAINT)),
                 ),
         )
-        .child(
-            toggle(value, label).on_event(on_change.into().map(|e: &ToggleEvent| {
-                let ToggleEvent::Change(value) = e;
-                *value
-            })),
-        )
+        .child(toggle().value(value).label(label).on_change(on_change))
 }
 
 /// The APIs a section shows, as code.
@@ -73,25 +70,18 @@ fn choice(
     labels: &[&'static str],
     selected: Signal<usize>,
     on_change: impl Into<Listener<u32>>,
-) -> ComponentElement<Segmented> {
-    Segmented::element(SegmentedProps {
-        options: labels
-            .iter()
-            .map(|l| Segment::new(*l))
-            .collect::<Vec<_>>()
-            .into(),
-        selected: Prop::bind(move || selected.get() as u32),
-        size: SegmentedSize::Small,
-    })
-    .on_event(on_change.into().map(|e: &SegmentedEvent| {
-        let SegmentedEvent::Change(i) = e;
-        *i
-    }))
+) -> SegmentedElement {
+    let on_change: Listener<u32> = on_change.into();
+    segmented()
+        .options(labels.iter().map(|l| Segment::new(*l)).collect::<Vec<_>>())
+        .selected(move || selected.get() as u32)
+        .size(SegmentedSize::Small)
+        .on_change(on_change)
 }
 
 /// A dot matrix with a low-alpha area and a dashed reference line: a
 /// page's backdrop, drawn for its laid out size.
-fn backdrop(size: (f32, f32), tone: Tone, seed: f32) -> Painter {
+fn backdrop_painter(size: (f32, f32), tone: Tone, seed: f32) -> Painter {
     let (width, height) = size;
     let mut p = Painter::new().fill_style(color(colors::BORDER));
     let mut x = 10.0;
@@ -133,7 +123,7 @@ fn backdrop(size: (f32, f32), tone: Tone, seed: f32) -> Painter {
     p.stroke_style(color(tone.color()))
         .line_width(1.5)
         .stroke()
-        .line_dash(&[3.0, 4.0])
+        .line_dash(&lengths([3.0, 4.0]))
         .stroke_style(color(colors::FAINT))
         .line_width(1.0)
         .begin_path()
@@ -165,8 +155,10 @@ fn Backdrop(props: BackdropProps) -> impl IntoElement {
         .left_0()
         .right_0()
         .bottom_0()
-        .child(canvas(move || backdrop(size.get(), tone, seed)).flex_1())
-        .on_layout(move |frame: &Rect| size.set((frame.width, frame.height)))
+        .child(canvas(move || backdrop_painter(size.get(), tone, seed)).flex_1())
+        .on_layout(move |frame: &Bounds<Points>| {
+            size.set((frame.size.width.0, frame.size.height.0))
+        })
 }
 
 /// The pages: a title, a figure, its note and tone.
@@ -186,22 +178,19 @@ fn Pager() -> impl IntoElement {
     // The pages' width: the scroll view's. Until the layout tells, as wide
     // as the scroll view would be (the section's inset is 32 + 12 + 28
     // narrower than the window).
-    let width = signal(untracked(window).width - 72.0);
+    let width = signal(untracked(window).width.0 - 72.0);
     let page = signal(0_usize);
-    // The scroll offset, fed natively, and the pages' width as a native
+    // The scroll offset, fed natively, and the pages' width as an animated
     // value: the offset in pages (`at`) moves the parallax and the
     // indicator without making them again when the width changes.
-    let x = native_value(0.0);
-    let pages_wide = native_value(width.get_untracked().max(1.0));
-    {
-        let pages_wide = pages_wide.clone();
-        effect(move || pages_wide.set(width.get().max(1.0)));
-    }
+    let x = animated_value(0.0);
+    let pages_wide = animated_value(width.get_untracked().max(1.0));
+    effect(move || pages_wide.set(width.get().max(1.0)));
     let at = x.div(&pages_wide);
-    let settle = move |e: &ScrollOffset| {
+    let settle = move |e: &Point<Points>| {
         let width = width.get_untracked();
         if width > 0.0 {
-            page.set((e.x / width).round().max(0.0) as usize);
+            page.set((e.x.0 / width).round().max(0.0) as usize);
         }
     };
     let pages = PAGES
@@ -214,10 +203,7 @@ fn Pager() -> impl IntoElement {
                 .w(move || px(width.get()))
                 .h(px(160.0))
                 .overflow_hidden()
-                .child(Backdrop::element(BackdropProps {
-                    tone,
-                    seed: i_f * 1.7,
-                }))
+                .child(backdrop().tone(tone).seed(i_f * 1.7))
                 .child(
                     view()
                         .p_4()
@@ -252,7 +238,7 @@ fn Pager() -> impl IntoElement {
                 .finish(Finish::Card)
                 .border_1()
                 .border_color(colors::LINE)
-                .on_layout(move |frame: &Rect| width.set(frame.width))
+                .on_layout(move |frame: &Bounds<Points>| width.set(frame.size.width.0))
                 .on_momentum_scroll_end(settle)
                 .on_scroll_end(settle)
                 .child(view().flex_row().children(pages)),
@@ -355,16 +341,16 @@ fn Cards() -> impl IntoElement {
             )
     })
     .horizontal()
-    .estimated_item_size(CARD + GAP)
-    .snap_interval(CARD + GAP)
+    .estimated_item_size(px(CARD + GAP))
+    .snap_interval(px(CARD + GAP))
     .snap_alignment(move || ALIGNS[align.get()].0)
     // `decelerationRate="fast"`.
     .deceleration(0.99)
     .disable_interval_momentum(one_step)
     .shows_indicator(false)
     .h(px(128.0))
-    .column_gap(GAP)
-    .content_padding_x(14.0);
+    .column_gap(px(GAP))
+    .content_padding_x(px(14.0));
     view()
         .gap_3()
         .child(view().mx(px(-14.0)).child(cards))
@@ -438,15 +424,17 @@ fn Events() -> impl IntoElement {
     // Which of [`THROTTLES`].
     let throttle = signal(1_usize);
     let note = move |name: &'static str, tone: Tone| {
-        move |e: &ScrollOffset| {
+        move |e: &Point<Points>| {
             log.update(|log| {
-                log.insert(0, (name, e.y.round(), tone));
+                log.insert(0, (name, e.y.0.round(), tone));
                 log.truncate(5);
             });
         }
     };
     let progress = move || match offset.get() {
-        Some(o) if o.content_height > o.height => o.y / (o.content_height - o.height),
+        Some(o) if o.content_size.height > o.size.height => {
+            o.offset.y / (o.content_size.height - o.size.height)
+        }
         _ => 0.0,
     };
     let rows = (1..=30).map(|i: u32| {
@@ -475,11 +463,11 @@ fn Events() -> impl IntoElement {
     let figure = Figure::new(move || {
         offset
             .get()
-            .map_or("0".to_owned(), |o| o.y.round().to_string())
+            .map_or("0".to_owned(), |o| o.offset.y.0.round().to_string())
     })
     .note(move || {
         offset.get().map_or("Scroll the box".to_owned(), |o| {
-            format!("/ {}", o.content_height.round())
+            format!("/ {}", o.content_size.height.0.round())
         })
     });
     view()
@@ -493,7 +481,7 @@ fn Events() -> impl IntoElement {
                     text(move || {
                         let viewport = offset
                             .get()
-                            .map_or("—".to_owned(), |o| o.height.round().to_string());
+                            .map_or("—".to_owned(), |o| o.size.height.0.round().to_string());
                         format!("viewport {viewport} pt")
                     })
                     .text_size(px(13.0))
@@ -516,8 +504,8 @@ fn Events() -> impl IntoElement {
                 .content_inset(move || {
                     if inset.get() {
                         EdgeInsets {
-                            top: 40.0,
-                            bottom: 40.0,
+                            top: px(40.0),
+                            bottom: px(40.0),
                             ..EdgeInsets::default()
                         }
                     } else {
@@ -576,7 +564,6 @@ fn Zoom() -> impl IntoElement {
     let bounces = signal(true);
     let tiles = (0..24).map(|i| {
         let tone = TONES[(i * 7) % TONES.len()];
-        let zoom = scroll_ref.clone();
         view()
             .w(px(74.0))
             .h(px(50.0))
@@ -587,7 +574,7 @@ fn Zoom() -> impl IntoElement {
             .border_color(colors::BORDER)
             .p(px(6.0))
             .justify_between()
-            .on_press(move |_: &()| {
+            .on_press(move || {
                 // The tile's middle, in the content's (unzoomed) points.
                 let x = 6.0 + (i % 4) as f32 * 80.0 + 37.0;
                 let y = 6.0 + (i / 4) as f32 * 56.0 + 25.0;
@@ -596,7 +583,7 @@ fn Zoom() -> impl IntoElement {
                 } else {
                     1.0
                 };
-                zoom.zoom_to(to, Some((x, y)), true);
+                scroll_ref.zoom_to(to, Some(point(px(x), px(y))), true);
             })
             .child(
                 view()
@@ -613,10 +600,9 @@ fn Zoom() -> impl IntoElement {
             )
     });
     let zoom_button = |label: &'static str, to: f32, variant: ButtonVariant| {
-        let zoom = scroll_ref.clone();
-        view()
-            .flex_1()
-            .child(Button::new(label, move |_: &()| zoom.zoom_to(to, None, true)).variant(variant))
+        view().flex_1().child(
+            Button::new(label, move |_: &()| scroll_ref.zoom_to(to, None, true)).variant(variant),
+        )
     };
     let note = move || {
         let scale = scale.get();
@@ -767,7 +753,7 @@ fn Feed() -> impl IntoElement {
                                 }),
                         )
                         .child(
-                            If::new(new, || Badge::new("new").tone(Tone::Accent)).otherwise(
+                            when(new, || Badge::new("new").tone(Tone::Accent)).otherwise(
                                 move || {
                                     text(move || format!("#{}", posts.with(|p| p[at.index()].id)))
                                         .text_size(px(13.0))
@@ -779,7 +765,7 @@ fn Feed() -> impl IntoElement {
                 },
             )
             .keys(move || posts.with(|p| p.iter().map(|p| p.id).collect::<Vec<_>>()))
-            .estimated_item_size(48.0)
+            .estimated_item_size(px(48.0))
             .h(px(240.0))
             .rounded(px(radius::CONTROL))
             .bg(colors::SURFACE)
@@ -817,37 +803,33 @@ pub(crate) fn Scrolling() -> impl IntoElement {
         KeyboardTaps::Always => "Taps never hide the keyboard.",
     };
     let tap_me = move || {
-        press_with(
-            PressProps {
-                label: Some("Count a tap".into()).into(),
-                ..PressProps::default()
-            },
-            move |_: &()| presses.update(|p| *p += 1),
-        )
-        .child(
-            view()
-                .h(px(44.0))
-                .rounded(px(radius::CONTROL))
-                .border_curve(BorderCurve::Continuous)
-                .bg(colors::LIGHT)
-                .finish(Finish::Light)
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .child(
-                    text(hint("Tap me", "Click me"))
-                        .text_size(px(15.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors::ON_LIGHT),
-                )
-                .child(
-                    text(move || presses.get().to_string())
-                        .text_size(px(15.0))
-                        .text_color(AdaptiveColor::new(rgb(0x9a9ea4), rgb(0x55595f)))
-                        .tabular_nums(),
-                ),
-        )
+        press()
+            .label("Count a tap")
+            .on_press(move || presses.update(|p| *p += 1))
+            .child(
+                view()
+                    .h(px(44.0))
+                    .rounded(px(radius::CONTROL))
+                    .border_curve(BorderCurve::Continuous)
+                    .bg(colors::LIGHT)
+                    .finish(Finish::Light)
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .child(
+                        text(hint("Tap me", "Click me"))
+                            .text_size(px(15.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(colors::ON_LIGHT),
+                    )
+                    .child(
+                        text(move || presses.get().to_string())
+                            .text_size(px(15.0))
+                            .text_color(AdaptiveColor::new(rgb(0x9a9ea4), rgb(0x55595f)))
+                            .tabular_nums(),
+                    ),
+            )
     };
     let taps_section = move || {
         Section::new("Taps with the keyboard up")
@@ -890,13 +872,13 @@ pub(crate) fn Scrolling() -> impl IntoElement {
             Section::new("Paging")
                 .note("5 pages")
                 .child(api("pagingEnabled · scrollValue"))
-                .child(Pager::element(()))
+                .child(pager())
         })
         .card(|| {
             Section::new("Snapping")
                 .note("20 cards")
                 .child(api("snapToInterval · snapToAlignment"))
-                .child(Cards::element(()))
+                .child(cards())
         })
         .card(|| {
             Section::new("Zoom")
@@ -905,13 +887,13 @@ pub(crate) fn Scrolling() -> impl IntoElement {
                     "Pinch on a touchpad or click a tile",
                 ))
                 .child(api("maximumZoomScale · zoomTo()"))
-                .child(Zoom::element(()))
+                .child(zoom())
         })
         .card(|| {
             Section::new("Events and behavior")
                 .child(api("onScroll · onScrollBeginDrag · onMomentumScrollEnd"))
-                .child(Events::element(()))
+                .child(events())
         })
-        .card(|| Section::new("Prepending keeps the position").child(Feed::element(())))
+        .card(|| Section::new("Prepending keeps the position").child(feed()))
         .card(taps_section)
 }
