@@ -11,6 +11,8 @@ use crate::{
     StatusBarSetting, StatusBarStyle, Viewability, WebSource,
     geometry::{Points, point, size},
     mount::ModalConfig,
+    ops::OverlayProp,
+    overlay::{OverlayAnchor, TooltipContent},
     props::{AccessibilityActionDef, AccessibilityValue, Checked, PanActivation, Ripple},
     ui::TsTypes,
 };
@@ -427,6 +429,26 @@ pub(crate) fn pinch<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
     Some(Prop::PinchValue(
         input.field("scale").and_then(|v| v.animated_node()),
     ))
+}
+
+/// `anchor`: a host element (a ref), `{ x, y }`, or nothing.
+pub(crate) fn overlay_anchor<I: HostInput>(input: &I, _: &mut HostCx) -> Option<OverlayProp> {
+    let anchor = match (input.node(), points(input, "x"), points(input, "y")) {
+        (Some(id), ..) => OverlayAnchor::Node(id),
+        (None, Some(x), Some(y)) => OverlayAnchor::Point(point(x, y)),
+        _ => OverlayAnchor::None,
+    };
+    Some(OverlayProp::Anchor(anchor))
+}
+
+/// `tooltip`: a string, an element (a node JS made), or nothing.
+pub(crate) fn tooltip<I: HostInput>(input: &I, _: &mut HostCx) -> Option<Prop> {
+    let content = match (input.node(), input.as_string()) {
+        (Some(id), _) => TooltipContent::Node(id),
+        (None, Some(text)) if !text.is_empty() => TooltipContent::Text(text.into()),
+        _ => TooltipContent::None,
+    };
+    Some(Prop::Tooltip(content))
 }
 
 /// `rotation`: `{ angle }`.

@@ -4,6 +4,7 @@ use crate::{
     animation::AnimationOp,
     geometry::{Bounds, DevicePixels, Percentage, Point, Points, Size},
     js::host::HostProps,
+    overlay::{Align, OverlayAnchor, Placement, TooltipContent},
     props::{AccessibilityProp, EdgeInsets, LayoutAnimation, PointerEvents},
     style::{Color, EllipsizeMode, Style, StylePatch},
     ui::PropEnum,
@@ -57,6 +58,10 @@ pub enum Tag {
     /// A component the embedding app registered (`<native component>`,
     /// created by `nsh/native`'s `nativeComponent`).
     Native,
+    /// A view shown on top of the root view it is in (`<overlay>`, TS:
+    /// `Overlay` of `nsh`), outside its parent's layout and clipping, laid
+    /// out on its own and placed by the core ([`crate::overlay`]).
+    Overlay,
 }
 
 impl Tag {
@@ -80,6 +85,7 @@ impl Tag {
             "webview" => Tag::WebView,
             "video" => Tag::Video,
             "native" => Tag::Native,
+            "overlay" => Tag::Overlay,
             _ => return None,
         })
     }
@@ -209,7 +215,11 @@ events! {
     HoverMove = "onHoverMove": "The mouse moved over a hovered view, with no button down (payload: [`EventPayload::Hover`]; at most one per frame).",
     ContextMenu = "onContextMenu": "The secondary button was pressed over the view (payload: [`EventPayload::ContextMenu`]): the nearest listener around the view under the pointer hears it, unless a text input or selectable text is nearer.",
     CompositionChange = "onCompositionChange": "An input method's composition in an input started, changed or ended (payload: `composing`, `text`: the text being composed, empty once it ends; after the `onChangeText` of the committed text).",
+    PressOutside = "onPressOutside": "A press went down outside an overlay, its anchor and the overlays inside it (payload: `pageX`, `pageY`; raised by the core).",
+    Cancel = "onCancel": "Escape or the Android back button was pressed while the overlay was the top one listening to it (raised by the core).",
+    Position = "onPosition": "The core placed an overlay (payload: `placement`, the side it went on, `x`, `y`, `width`, `height` in the root view, `availableWidth`, `availableHeight`: the room on that side).",
     MouseMove = "onMouseMove": "The mouse moved inside the view, including with a button down (desktops and web; local coordinates `x`, `y`; at most once per frame).",
+
 }
 
 /// What an input holds, for the system's autofill and suggestions
@@ -1038,6 +1048,42 @@ pub enum ModalProp {
     CloseOnSwipe(bool),
 }
 
+/// An overlay option (`<Overlay …>`, [`crate::overlay`]).
+#[derive(Debug, Clone, Copy, PartialEq, HostProps)]
+pub enum OverlayProp {
+    /// `anchor`: the view (a ref) or the point (`{ x, y }` in the root view,
+    /// as touches' `pageX` / `pageY`) it is placed against, following a
+    /// view as it moves; without one it is laid out as a `position: fixed`
+    /// box of its root view.
+    #[prop(js = "anchor", with = crate::js::host_values::overlay_anchor, reset = OverlayProp::Anchor(OverlayAnchor::None), ts = "YNode | { x: number; y: number } | null", on = OVERLAY)]
+    Anchor(OverlayAnchor),
+    /// `placement`: the side of the anchor it goes on (default `"bottom"`);
+    /// the other side when only that one has room.
+    #[prop(js = "placement", on = OVERLAY)]
+    Placement(Placement),
+    /// `align`: how it lines up with the anchor along that side (default
+    /// `"center"`; `"start"` / `"end"` follow the layout direction above and
+    /// below).
+    #[prop(js = "align", on = OVERLAY)]
+    Align(Align),
+    /// `offset`: the gap between the anchor and the overlay (default 0).
+    #[prop(js = "offset", on = OVERLAY)]
+    Offset(Points),
+    /// `margin`: the distance it keeps from the edges of the root view's
+    /// safe area (default 0).
+    #[prop(js = "margin", on = OVERLAY)]
+    Margin(Points),
+    /// A hint (a tooltip) shown after the pointer rested on the anchor this
+    /// long ([`crate::overlay::OverlayConfig::hint`]); set by components
+    /// (`nsh-base`'s `Tooltip`).
+    #[prop(reset = OverlayProp::Hint(None))]
+    Hint(Option<std::time::Duration>),
+    /// A hint shown or hidden whatever the pointer does
+    /// ([`crate::overlay::OverlayConfig::open`]); set by components.
+    #[prop(reset = OverlayProp::Open(None))]
+    Open(Option<bool>),
+}
+
 /// An imperative call on a native view (`ref.focus()` and the like).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
@@ -1572,6 +1618,13 @@ pub enum Prop {
     /// `checkedStyle`: the style while `accessibilityState.checked` (true,
     /// not mixed: a checkbox's, a switch's, a radio's), and not disabled.
     CheckedStyle(Option<Arc<StylePatch>>),
+    /// The states a part of a control shows its classes and state styles
+    /// as its control has them ([`crate::tailwind::state`] bits: `checked`,
+    /// `disabled`): a switch's thumb styled `checked:` while the switch is
+    /// on. They tell screen readers nothing and take no presses away: the
+    /// control announces and handles them. Set by components
+    /// (`Interactive::project_checked`, `project_disabled`), never by JS.
+    ProjectedStates(u8),
     /// `headerStyle` of a page: `backgroundColor`, `color` (the title's) and
     /// `tintColor` (the buttons') of its header.
     HeaderStyle(Option<Arc<StylePatch>>),
@@ -1643,6 +1696,14 @@ pub enum Prop {
     /// a draggable view stay clickable without it.
     #[prop(desktop = "windowDrag")]
     WindowDrag(Option<bool>),
+    /// `tooltip`: a hint about the view, shown above it on the desktops
+    /// while the pointer rests on it (after half a second) until the
+    /// pointer leaves or presses it, never on touch screens; it never takes
+    /// the pointer. A string shows in a minimal bubble drawn with the
+    /// theme's `popover` tokens; an element is shown as it is (style it, or
+    /// use `Tooltip` of `nsh/base` for its placement, delay and events).
+    #[prop(js = "tooltip", with = crate::js::host_values::tooltip, reset = Prop::Tooltip(TooltipContent::None), ts = "JSX.Element")]
+    Tooltip(TooltipContent),
     /// `focusable`: whether a view that takes presses is a stop of the
     /// keyboard focus (Tab, on the platforms that move it between
     /// pressables); `false` leaves it to the pointer (a backdrop that
@@ -1684,6 +1745,9 @@ pub enum Prop {
     /// A modal option.
     #[prop(nested)]
     Modal(ModalProp),
+    /// An overlay option.
+    #[prop(nested)]
+    Overlay(OverlayProp),
     /// `<headeritem slot>`.
     #[prop(js = "headerSlot", internal)]
     HeaderSlot(HeaderSlot),

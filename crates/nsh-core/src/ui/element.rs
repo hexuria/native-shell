@@ -139,6 +139,10 @@ impl<E: Event> super::EventToJs for E {
     fn data_js<'a>(&self, host: &'a dyn super::JsHost) -> Result<super::JsOwned<'a>, PropError> {
         Event::data_js(self, host)
     }
+
+    fn spread(&self) -> bool {
+        Event::spread(self)
+    }
 }
 
 impl<E: Event> AnyEvent for E {
@@ -182,6 +186,9 @@ pub struct Attrs {
     pub(crate) class: Option<SharedString>,
     /// The view is a selection area ([`crate::selection`]).
     pub(crate) selection_area: bool,
+    /// The states it shows as its control's part
+    /// ([`Interactive::project_checked`]).
+    pub(crate) projected_states: u8,
     /// Where a JS renderer's content goes (the element is its
     /// placeholder: [`super::Renderer::render`]).
     pub(crate) render: Option<super::renderer::RenderAt>,
@@ -234,6 +241,9 @@ impl Attrs {
         }
         if self.selection_area != old.selection_area {
             out.push(Prop::SelectionArea(self.selection_area));
+        }
+        if self.projected_states != old.projected_states {
+            out.push(Prop::ProjectedStates(self.projected_states));
         }
         // Host props: the ones no longer set go back to their defaults,
         // then the new and changed ones.
@@ -639,7 +649,9 @@ where
     }
 }
 
-/// Conditional building.
+/// Conditional building, as GPUI's `FluentBuilder` (`gpui::prelude`): decided
+/// once, as the element is made. What must follow a signal is a region
+/// ([`super::when`], [`super::dynamic`]).
 pub trait FluentBuilder: Sized {
     /// `then(self)` when `condition` holds.
     fn when(self, condition: bool, then: impl FnOnce(Self) -> Self) -> Self {
@@ -1041,8 +1053,87 @@ pub trait Accessible: Element {
     }
 }
 
+/// What an element's tooltip can be ([`Interactive::tooltip`]): a text,
+/// in a minimal bubble drawn with the theme's `popover` tokens, or an
+/// element, shown as it is.
+pub trait IntoTooltip {
+    #[doc(hidden)]
+    fn apply_tooltip(self, node: &mut ElNode);
+}
+
+impl IntoTooltip for &'static str {
+    fn apply_tooltip(self, node: &mut ElNode) {
+        SharedString::from(self).apply_tooltip(node);
+    }
+}
+
+impl IntoTooltip for String {
+    fn apply_tooltip(self, node: &mut ElNode) {
+        SharedString::from(self).apply_tooltip(node);
+    }
+}
+
+impl IntoTooltip for SharedString {
+    fn apply_tooltip(self, node: &mut ElNode) {
+        let content = if self.is_empty() {
+            crate::overlay::TooltipContent::None
+        } else {
+            crate::overlay::TooltipContent::Text(Arc::from(self.as_str()))
+        };
+        super::host::set(node, Prop::Tooltip(content));
+    }
+}
+
+impl IntoTooltip for AnyElement {
+    fn apply_tooltip(self, node: &mut ElNode) {
+        // A hint overlay inside the element, as the core makes for a text.
+        let mut hint = ElNode::new(Tag::Overlay);
+        hint.key = Some("tooltip".into());
+        hint.attrs.pointer_events = PointerEvents::None;
+        let gap = Points(4.0);
+        for prop in [
+            crate::OverlayProp::Hint(Some(crate::overlay::HINT_DELAY)),
+            crate::OverlayProp::Placement(crate::overlay::Placement::Top),
+            crate::OverlayProp::Offset(gap),
+            crate::OverlayProp::Margin(gap),
+        ] {
+            super::host::set(&mut hint, Prop::Overlay(prop));
+        }
+        hint.children.push(self.0);
+        node.children.push(hint);
+    }
+}
+
+impl<C: Component> IntoTooltip for ComponentElement<C> {
+    fn apply_tooltip(self, node: &mut ElNode) {
+        self.into_element().apply_tooltip(node);
+    }
+}
+
+/// Makes `hint`, an element whose root is a hint overlay
+/// ([`super::Overlay::hint`]: `nsh_base`'s `Tooltip`), the tooltip of
+/// `node` as it is, with no overlay of the core's around it (its
+/// [`IntoTooltip`]).
+#[doc(hidden)]
+pub fn __hint_tooltip(node: &mut ElNode, hint: AnyElement) {
+    let mut hint = hint.0;
+    hint.key = Some("tooltip".into());
+    node.children.push(hint);
+}
+
 /// Elements that take touches.
 pub trait Interactive: Element {
+    /// A hint about it, shown above it on the desktops while the pointer
+    /// rests on it (after half a second), until the pointer leaves or
+    /// presses it; never on touch screens, and it never takes the pointer.
+    /// A text shows in a minimal bubble drawn with the theme's `popover`
+    /// tokens; an element is shown as it is. `nsh_base`'s `Tooltip` places
+    /// one, delays it and reports it.
+    fn tooltip(mut self, tooltip: impl IntoTooltip) -> Self {
+        tooltip.apply_tooltip(self.node());
+        self
+    }
+
     /// A local file drag entered this desktop drop destination.
     fn on_file_drag_enter<M>(self, listener: impl IntoListener<(), M>) -> Self {
         self.on(
@@ -1474,6 +1565,38 @@ pub trait Interactive: Element {
         });
         self
     }
+
+    /// Styles it as checked while `checked` holds (its `checked:` classes
+    /// and [`Self::checked_style`]), as a part of a control that is: a
+    /// switch's track and thumb, a checkbox's mark (`gpui-base`'s
+    /// `SwitchThumb::new(checked)`). Screen readers hear it from the
+    /// control alone, so the part is no second checkable element.
+    fn project_checked(mut self, checked: impl IntoReactive<bool>) -> Self {
+        self.node().bind_attr(checked, |a, checked| {
+            project(a, crate::tailwind::state::CHECKED, checked)
+        });
+        self
+    }
+
+    /// Styles it as disabled while `disabled` holds (its `disabled:`
+    /// classes and [`Self::disabled_style`]), as a part of a disabled
+    /// control (`gpui-base`'s `SwitchThumb::disabled`). The control takes
+    /// no presses and tells screen readers; the part keeps its own.
+    fn project_disabled(mut self, disabled: impl IntoReactive<bool>) -> Self {
+        self.node().bind_attr(disabled, |a, disabled| {
+            project(a, crate::tailwind::state::DISABLED, disabled)
+        });
+        self
+    }
+}
+
+/// Sets or clears `bit` of the states an element shows as a part.
+fn project(a: &mut Attrs, bit: u8, on: bool) {
+    if on {
+        a.projected_states |= bit;
+    } else {
+        a.projected_states &= !bit;
+    }
 }
 
 macro_rules! element {
@@ -1495,6 +1618,12 @@ macro_rules! element {
         }
 
         impl Accessible for $name {}
+
+        impl IntoTooltip for $name {
+            fn apply_tooltip(self, node: &mut ElNode) {
+                self.into_element().apply_tooltip(node);
+            }
+        }
     };
 }
 

@@ -20,6 +20,7 @@ mod component_bench;
 mod components;
 mod counter;
 mod errors;
+mod external_wake;
 mod fetch;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod fs;
@@ -46,6 +47,7 @@ mod rust_inputs;
 mod rust_lists;
 mod rust_media;
 mod rust_platform;
+mod rust_popups;
 mod rust_renderers;
 mod rust_scrolling;
 mod rust_styles;
