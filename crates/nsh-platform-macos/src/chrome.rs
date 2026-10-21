@@ -176,10 +176,17 @@ pub(crate) fn update_area(surface: &Surface) {
                 MainThreadMarker::from(&*window),
             );
             let natural = (frame.size.height - content.size.height) as f32;
-            // A toolbar's native height is determined by AppKit, not the
-            // requested height that selected its style. Include a host's
-            // toolbar too, so the app reserves its actual obscured area.
-            let height = if window.toolbar().is_some() {
+            // Our own title-bar toolbar is an empty stand-in for light
+            // placement: the area the app reserved is the requested
+            // height (at least the natural bar). A host's own toolbar has
+            // a native height instead — measure the unobscured rect.
+            let height = if surface.chrome.toolbar.borrow().is_some() {
+                surface
+                    .chrome
+                    .height
+                    .get()
+                    .map_or(natural, |h| natural.max(h))
+            } else if window.toolbar().is_some() {
                 toolbar_height(frame.size.height, window.contentLayoutRect(), natural)
             } else {
                 natural
@@ -215,7 +222,11 @@ pub(crate) fn update_area(surface: &Surface) {
 /// The unobscured rectangle is in window coordinates, including its origin.
 fn toolbar_height(frame_height: f64, layout: NSRect, natural: f32) -> f32 {
     let height = frame_height - (layout.origin.y + layout.size.height);
-    if height.is_finite() && height > 0.0 {
+    // A transient layout — mid style change, before the content view has
+    // grown to the window — can report a top strip far taller than any
+    // real title bar plus toolbar; the app would reserve a bogus area.
+    // Fall back to the natural height then.
+    if height.is_finite() && height > 0.0 && height <= 160.0 {
         height as f32
     } else {
         natural
