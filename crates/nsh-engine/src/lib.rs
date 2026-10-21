@@ -12,6 +12,8 @@ mod access;
 mod app_directory;
 mod error;
 mod local_storage;
+#[cfg(feature = "net")]
+pub mod net;
 pub mod perf;
 mod script;
 #[cfg(not(target_arch = "wasm32"))]
@@ -50,7 +52,7 @@ pub use nsh_core::{
     },
     storage::{StorageBackend, StorageChange},
     time::Clock,
-    ui::{Root, Theme},
+    ui::{Root, Tokens},
 };
 #[cfg(feature = "js")]
 pub use nsh_js::BYTECODE_VERSION;
@@ -788,7 +790,7 @@ enum Message {
     Scroll(NodeId, Point<Points>, u32),
     Zoom(NodeId, f32),
     ComponentSize(NodeId, Size<Points>),
-    AnimationsFinished(Vec<nsh_animation::Finished>),
+    AnimationsFinished(Vec<nsh_core::animation::Finished>),
     Resize(Size<Points>),
     /// A component's task was woken: it runs in the loop.
     Wake,
@@ -806,8 +808,8 @@ enum Message {
     /// not be loaded (its id and the message).
     Chunk(Result<Chunk, (String, String)>),
     Perf(Option<Arc<perf::PerfMonitor>>),
-    /// The embedding app's theme.
-    Theme(Option<Box<Theme>>),
+    /// The embedding app's design tokens.
+    Tokens(Option<Box<Tokens>>),
     /// Moves a manual clock forward by this much, then calls back.
     Advance(std::time::Duration, Box<dyn FnOnce() + Send>),
     /// Sent by a dropped [`Engine`] (there is none in WebAssembly).
@@ -867,7 +869,7 @@ impl EngineControl {
     }
 
     /// Reports native animations that finished or were interrupted.
-    pub fn animations_finished(&self, finished: Vec<nsh_animation::Finished>) {
+    pub fn animations_finished(&self, finished: Vec<nsh_core::animation::Finished>) {
         let _ = self.tx.send(Message::AnimationsFinished(finished));
     }
 
@@ -949,12 +951,12 @@ impl EngineControl {
         let _ = self.tx.send(Message::Perf(monitor));
     }
 
-    /// Sets the embedding app's theme, which the UI sets' components
-    /// render with instead of the app's own (`None`: the app's again;
-    /// [`Core::set_host_theme`]). Sent from [`Engine::start_with`]'s
-    /// `setup`, it is in the first frame.
-    pub fn set_theme(&self, theme: Option<Theme>) {
-        let _ = self.tx.send(Message::Theme(theme.map(Box::new)));
+    /// Sets the embedding app's design tokens (`nsh-base`'s theme's),
+    /// which the app renders with instead of its own (`None`: its own
+    /// again; [`Core::set_host_tokens`]). Sent from
+    /// [`Engine::start_with`]'s `setup`, they are in the first frame.
+    pub fn set_tokens(&self, tokens: Option<Tokens>) {
+        let _ = self.tx.send(Message::Tokens(tokens.map(Box::new)));
     }
 }
 
@@ -1198,8 +1200,8 @@ impl<M: TextEngine + 'static> Driver<M> {
         // A Rust app's theme and fonts come with its root (a JS app's from
         // its bundle).
         if let App::Rust(root) = &config.app {
-            if let Some(theme) = root.theme_ref() {
-                core.set_theme(theme.clone());
+            if let Some(tokens) = root.tokens_ref() {
+                core.set_tokens(tokens.clone());
             }
             if let Some(appearance) = root.appearance_ref() {
                 core.set_appearance(appearance);
@@ -2179,7 +2181,7 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
             state.perf = monitor;
             state.perf_commit = perf::CommitTiming::default();
         }
-        Message::Theme(theme) => state.core.set_host_theme(theme.map(|t| *t)),
+        Message::Tokens(tokens) => state.core.set_host_tokens(tokens.map(|t| *t)),
         // The driver handles it ([`Driver::handle`]), and keeps the ones
         // sent before it started for after the first frame.
         Message::Advance(..) => unreachable!("the driver moves the clock"),

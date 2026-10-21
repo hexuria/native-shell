@@ -104,6 +104,9 @@ enum Msg {
     Reload,
     /// The status line shown as number `.0` is done.
     HideStatus(u64),
+    /// A test session's model of the app, for the surface to keep from the
+    /// first bundle on (it comes before it).
+    TestModel(Arc<nsh_testing::agent::Model>),
 }
 
 /// Numbers the sessions: a replaced session's task stops.
@@ -260,9 +263,23 @@ pub(crate) fn start(this: &AppView, url: String, cx: &mut Context<AppView>) {
             .iter()
             .filter_map(|set| set.specifier().map(str::to_owned))
             .collect(),
+        tests: true,
     };
+    // A test session (`nsh test --target gpui`): the model goes to the
+    // surface through the session's messages, ahead of the bundle.
+    let models = tx.clone();
+    let key = surface.key();
+    let tester = nsh_testing::agent::Tester::new(move |model| {
+        let _ = models.unbounded_send(Msg::TestModel(model));
+        Box::new(crate::agent::GpuiNative::new(key))
+    });
+    let tests = tester.clone();
     let events = tx;
     let started = DevClient::start(url, host, move |event| {
+        // Taken here: a step waits for what it does on the main thread.
+        let Some(event) = tests.event(event) else {
+            return;
+        };
         match event {
             DevEvent::Connected => CONNECTED.store(true, Ordering::Relaxed),
             DevEvent::Disconnected => CONNECTED.store(false, Ordering::Relaxed),
@@ -273,6 +290,7 @@ pub(crate) fn start(this: &AppView, url: String, cx: &mut Context<AppView>) {
     match started {
         Ok(client) => {
             let client = Arc::new(client);
+            tester.set_client(&client);
             *CLIENT.lock().unwrap_or_else(|e| e.into_inner()) = Arc::downgrade(&client);
             session._client = Some(client);
         }
@@ -376,18 +394,22 @@ fn handle(view: &AppView, msg: Msg) {
             session.show_error(error_title(&error), &error.to_string(), false);
             None
         }
-        Msg::HotUpdateFailed => reload(session),
-        Msg::Reload => reload_latest(session),
+        Msg::HotUpdateFailed => reload(session).map(App::Js),
+        Msg::Reload => reload_latest(session).map(App::Js),
         Msg::HideStatus(shown) => {
             if session.status.as_ref().is_some_and(|s| s.1 == shown) {
                 session.hide_status();
             }
             None
         }
+        Msg::TestModel(model) => {
+            view.surface().set_test_model(Some(model));
+            None
+        }
     };
     drop(dev);
-    if let Some(bundle) = load {
-        view.load(App::Js(bundle));
+    if let Some(app) = load {
+        view.load(app);
     }
 }
 
@@ -402,11 +424,31 @@ fn error_title(error: &AppError) -> &'static str {
     }
 }
 
-/// Handles one event of the dev client; returns the bundle to load.
-fn on_event(view: &AppView, dev: &mut DevSession, event: DevEvent) -> Option<Bundle> {
+/// Handles one event of the dev client; returns the app to load.
+fn on_event(view: &AppView, dev: &mut DevSession, event: DevEvent) -> Option<App> {
     match event {
         DevEvent::Connected => dev.hide_status(),
         DevEvent::Disconnected => dev.show_status(Status::Reconnecting),
+        // The client's thread hands them to the test agent.
+        DevEvent::Testing
+        | DevEvent::Step { .. }
+        | DevEvent::TestSetup { .. }
+        | DevEvent::Fetch { .. } => {}
+        DevEvent::Root => {
+            dev.hide_status();
+            let Some(root) = crate::app::root() else {
+                dev.show_error(
+                    "This host cannot run the app",
+                    "The app is of Rust only, and this host was not built with its root.",
+                    true,
+                );
+                return None;
+            };
+            dev.latest = None;
+            dev.running = None;
+            dev.error = None;
+            return Some(App::Rust(root));
+        }
         DevEvent::Building => dev.show_status(Status::Building),
         DevEvent::BuildFailed(message) => {
             dev.hide_status();
@@ -481,7 +523,7 @@ fn on_event(view: &AppView, dev: &mut DevSession, event: DevEvent) -> Option<Bun
             if running.is_some() {
                 dev.show_status(Status::Reloaded);
             }
-            return Some(bundle);
+            return Some(App::Js(bundle));
         }
         DevEvent::Patch {
             session,

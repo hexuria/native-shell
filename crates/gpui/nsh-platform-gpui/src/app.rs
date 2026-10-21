@@ -1,6 +1,6 @@
 //! `AppView` (one surface as a GPUI view, for embedding in any GPUI or
-//! GPUI Kit app) and the standalone app ([`run_app`]: one `AppView`
-//! filling a window).
+//! GPUI Kit app) and the development host's window ([`run_app`]: one
+//! `AppView` filling a window).
 
 use std::{
     cell::RefCell,
@@ -13,12 +13,10 @@ use gpui::{
     App as GpuiApp, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
     IntoElement, ParentElement, Render, Styled, Window,
 };
-use nsh_core::{
-    platform::{Appearance, Locale},
-    ui::ThemeError,
-};
+use nsh_base::{Theme, ThemeError};
+use nsh_core::platform::{Appearance, Locale};
 use nsh_engine::{
-    App, AppError, Bundle, ColorScheme, EngineConfig, Environment, Idiom, Limits, Os, Root, Theme,
+    App, AppError, Bundle, ColorScheme, EngineConfig, Environment, Idiom, Limits, Os, Root,
 };
 
 use crate::{
@@ -69,6 +67,26 @@ pub fn set_ui_sets(sets: Vec<nsh_core::ui::Registry>) {
     *UI_SETS.write().unwrap_or_else(|e| e.into_inner()) = Some(sets);
 }
 
+/// The app's Rust root ([`set_root`]).
+#[cfg(feature = "dev")]
+static ROOT: RwLock<Option<fn() -> Root>> = RwLock::new(None);
+
+/// Sets the root of an app of Rust only (`nsh.json` `"root"`), which this
+/// development host runs when its dev server publishes the app as the
+/// host's root (`nsh test --target gpui` of such an app) instead of a
+/// bundle.
+#[cfg(feature = "dev")]
+pub fn set_root(root: fn() -> Root) {
+    *ROOT.write().unwrap_or_else(|e| e.into_inner()) = Some(root);
+}
+
+/// The app's Rust root, if the host has one ([`set_root`]).
+#[cfg(feature = "dev")]
+pub(crate) fn root() -> Option<Root> {
+    let root = *ROOT.read().unwrap_or_else(|e| e.into_inner());
+    root.map(|root| root())
+}
+
 /// The UI sets engines serve.
 pub(crate) fn ui_sets() -> Vec<nsh_core::ui::Registry> {
     UI_SETS
@@ -107,9 +125,6 @@ pub struct AppOptions {
     pub title: String,
     /// The initial window size in points.
     pub size: (i32, i32),
-    /// Steps run once the window shows (`wait 500; shot a.png; tap 10 20;
-    /// quit`): for checking a backend change without touching the screen.
-    pub script: Option<String>,
     /// The native components apps can use (`nsh/native`); shared by the
     /// views made with these options. See [`AppView::register_component`].
     pub components: crate::native::Components,
@@ -119,9 +134,8 @@ pub struct AppOptions {
     /// [`AppView::set_fps_monitor`].
     pub fps: bool,
     /// The VM limits of the apps it runs: [`Limits::default`] (an app
-    /// embedded in a host app) unless set; the development host and the
-    /// release runner run apps on their own, with none
-    /// ([`Limits::standalone`]). See [`AppView::set_limits`].
+    /// embedded in a host app) unless set; the development host runs
+    /// apps on their own, with none ([`Limits::standalone`]). See [`AppView::set_limits`].
     pub limits: Limits,
     /// Where the apps it runs keep their data, each in `<dir>/<app id>`
     /// (`nsh.json` `"id"`, which travels with the bundle): `None` uses the
@@ -141,7 +155,6 @@ impl Default for AppOptions {
             app_id: "com.longbridge.nsh.host".to_owned(),
             title: "nsh".to_owned(),
             size: (1200, 800),
-            script: None,
             components: Default::default(),
             appearance: Appearance::System,
             fps: false,
@@ -272,7 +285,7 @@ impl AppView {
             app,
             viewport: nsh_core::Size::default(),
             trace: options.trace,
-            network: Some(crate::net::network()),
+            network: Some(nsh_engine::net::network()),
             websocket: None,
             filesystem: None,
             assets: Some(Arc::new(AssetReader(options.asset_base.clone()))),
@@ -358,7 +371,8 @@ impl AppView {
     /// frame on.
     pub fn set_theme(&self, theme: Option<Theme>, cx: &mut GpuiApp) {
         *self.surface.host_theme.borrow_mut() = theme.clone();
-        self.surface.control(|c| c.set_theme(theme));
+        self.surface
+            .control(|c| c.set_tokens(theme.map(Theme::into_tokens)));
         self.surface.invalidate();
         crate::rt::flush(cx);
     }
@@ -366,7 +380,7 @@ impl AppView {
     /// [`AppView::set_theme`] with a theme in gpui-kit's JSON format
     /// (`{ "themes": [{ "mode": "light", "colors": { … } }, …] }`: a
     /// gpui-kit theme file, or `ThemeConfig`s serialized; null colors are
-    /// left as they are), over nsh's default theme.
+    /// left as they are), over `nsh/base`'s default theme.
     pub fn set_theme_json(&self, json: &str, cx: &mut GpuiApp) -> Result<(), ThemeError> {
         let theme = Theme::from_json(json)?;
         self.set_theme(Some(theme), cx);
@@ -727,7 +741,6 @@ pub fn open_app_window(
         inactive_frame_interval: None,
         ..Default::default()
     };
-    let script = options.script.clone();
     let handle = cx.open_window(window_options, move |window, cx| {
         let title = options.title.clone();
         let view: Entity<AppView> = cx.new(|cx| AppView::new(options, window, cx));
@@ -745,14 +758,11 @@ pub fn open_app_window(
         window.focus(&focus, cx);
         view
     })?;
-    if let Some(script) = script {
-        crate::script::run(handle, &script, cx);
-    }
     Ok(handle)
 }
 
 /// Runs `source` in a window until it is closed. Fails when the window
-/// cannot open or [`AppOptions::script`] failed.
+/// cannot open.
 pub fn run_app(source: AppSource, options: AppOptions) -> std::process::ExitCode {
     let ok = Rc::new(std::cell::Cell::new(true));
     let result = ok.clone();
@@ -771,7 +781,7 @@ pub fn run_app(source: AppSource, options: AppOptions) -> std::process::ExitCode
         }
         cx.activate(true);
     });
-    if result.get() && !crate::script::failed() {
+    if result.get() {
         std::process::ExitCode::SUCCESS
     } else {
         std::process::ExitCode::FAILURE

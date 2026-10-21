@@ -258,13 +258,17 @@ impl ResolveSetup {
 /// `nsh.json` next to the entry, checked. `"theme"` is a gpui-kit theme file's path (relative
 /// to `nsh.json`) or its content.
 fn tailwind_setup(dir: &std::path::Path) -> Result<Arc<plugin::ThemeSetup>, BundleError> {
+    let mut setup = plugin::ThemeSetup::default();
+    // The theme's tokens are classes (`bg-primary`): the default's unless
+    // the app sets its own.
+    let mut tokens = nsh_base::Theme::default().into_tokens();
     let path = dir.join("nsh.json");
     let Ok(text) = std::fs::read_to_string(&path) else {
-        return Ok(Arc::default());
+        setup.theme.set_tokens(&tokens);
+        return Ok(Arc::new(setup));
     };
     let config: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| BundleError::other(format!("nsh.json: {e}")))?;
-    let mut setup = plugin::ThemeSetup::default();
     if let Some(tailwind) = config.get("tailwind") {
         let json = tailwind.to_string();
         setup.theme = nsh_core::tailwind::Theme::from_json(&json)
@@ -277,12 +281,12 @@ fn tailwind_setup(dir: &std::path::Path) -> Result<Arc<plugin::ThemeSetup>, Bund
                 .map_err(|e| BundleError::other(format!("nsh.json: theme: {file}: {e}")))?,
             v => v.to_string(),
         };
-        let ui = nsh_core::ui::Theme::from_json(&json)
-            .map_err(|e| BundleError::other(format!("nsh.json: theme: {e}")))?;
-        // Its tokens are classes too (`bg-primary`).
-        setup.theme.set_tokens(&ui);
+        tokens = nsh_base::Theme::from_json(&json)
+            .map_err(|e| BundleError::other(format!("nsh.json: theme: {e}")))?
+            .into_tokens();
         setup.ui = Some(json);
     }
+    setup.theme.set_tokens(&tokens);
     if let Some(appearance) = config.get("appearance") {
         setup.appearance = match appearance.as_str() {
             Some("light") => Some("light"),
@@ -840,6 +844,78 @@ mod tests {
         assert!(!bundle.code.contains("import("), "{}", bundle.code);
         assert!(!bundle.code.contains("__nsh_import"), "{}", bundle.code);
         assert!(bundle.code.contains("second screen"), "{}", bundle.code);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An app importing `files` (name, contents) as images.
+    fn svg_app(name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nsh-svg-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = String::from(
+            "import { mount, View } from \"nsh\";\nimport { Image } from \"nsh/image\";\n",
+        );
+        for (i, (file, svg)) in files.iter().enumerate() {
+            std::fs::write(dir.join(file), svg).unwrap();
+            app.push_str(&format!(
+                "import a{i} from \"./{file}\";\nconsole.log(JSON.stringify(a{i}));\n"
+            ));
+        }
+        app.push_str("mount(() => <View />);\n");
+        std::fs::write(dir.join("App.tsx"), app).unwrap();
+        dir
+    }
+
+    fn bundle_dev(dir: &std::path::Path) -> Result<Bundle, BundleError> {
+        bundle(&BundleOptions {
+            entry: dir.join("App.tsx"),
+            minify: false,
+            split: false,
+            ui_sets: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn svg_import_is_sized_in_points() {
+        let icon = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M2 2h20v20z"/></svg>"#;
+        let logo = r#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="96" viewBox="0 0 48 24"/>"#;
+        let odd = r#"<svg xmlns="http://www.w3.org/2000/svg" width="9.6" height="4.8"/>"#;
+        let dir = svg_app(
+            "size",
+            &[("icon.svg", icon), ("logo@2x.svg", logo), ("odd.svg", odd)],
+        );
+        let bundle = bundle_dev(&dir).unwrap();
+        let code: String = bundle.code.split_whitespace().collect();
+        assert!(
+            code.contains("uri:\"asset:/icon.svg\",width:24,height:24"),
+            "{code}"
+        );
+        // One side and the viewBox's ratio; `@2x` does not apply to SVG.
+        assert!(
+            code.contains("uri:\"asset:/logo@2x.svg\",width:96,height:48"),
+            "{code}"
+        );
+        // The shortest number of the size they lay out at.
+        assert!(
+            code.contains("uri:\"asset:/odd.svg\",width:9.6,height:4.8"),
+            "{code}"
+        );
+        assert_eq!(bundle.assets.len(), 3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn svg_import_of_an_invalid_svg_fails_naming_it() {
+        let dir = svg_app(
+            "invalid",
+            &[(
+                "broken.svg",
+                "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect",
+            )],
+        );
+        let error = bundle_dev(&dir).unwrap_err();
+        assert!(error.plain.contains("broken.svg"), "{error}");
+        assert!(error.plain.contains("invalid SVG: "), "{error}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

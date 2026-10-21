@@ -10,7 +10,7 @@ use std::sync::Arc;
 use super::{
     Accessible, AnyElement, Interactive, IntoReactive,
     element::{ElNode, Element, IntoElement, IntoListener, Listener, ParentElement},
-    events::{self, NativeEvent, Selection, VideoInfo, VideoProgress, WebNavigation},
+    events::{self, Composition, NativeEvent, Selection, VideoInfo, VideoProgress, WebNavigation},
 };
 use crate::{
     AutoCapitalize, AutoFill, Color, EventKind, HeaderSlot, Hsla, JsonValue, KeyboardAppearance,
@@ -61,9 +61,12 @@ crate::static_reactive!(ModalPresentation: ModalPresentation);
 crate::static_reactive!(ResizeMode: ResizeMode);
 crate::static_reactive!(ReturnKeyType: ReturnKeyType);
 crate::static_reactive!(SubmitBehavior: SubmitBehavior);
+crate::static_reactive!(crate::EllipsizeMode: crate::EllipsizeMode);
+crate::static_reactive!(JsonValue: JsonValue);
+crate::static_reactive!(StatusBarSetting: StatusBarSetting, crate::StatusBarStyle);
 
 /// Sets `prop` among `props`, replacing one of its kind.
-fn set_in(props: &mut Vec<Prop>, prop: Prop) {
+pub(crate) fn set_in(props: &mut Vec<Prop>, prop: Prop) {
     match props.iter_mut().find(|p| same_kind(p, &prop)) {
         Some(p) => *p = prop,
         None => props.push(prop),
@@ -154,7 +157,8 @@ host_element! {
 }
 
 host_element! {
-    /// A native navigation stack (`<stack>`), made by [`stack`]:
+    /// A native navigation stack (`<stack>`, TS: `NavStack` of `nsh/base`),
+    /// made by `nsh_base::nav_stack`:
     /// UINavigationController on iOS (swipe back, native header), a stack
     /// with a toolbar and predictive back on Android. Its children are its
     /// [`Screen`]s, bottom to top.
@@ -162,14 +166,16 @@ host_element! {
 }
 
 host_element! {
-    /// One screen of a [`Stack`] (`<screen>`), made by [`screen`]: its
-    /// header options and its content (its children).
+    /// One page of a [`Stack`] (`<screen>`, TS: `NavPage` of `nsh/base`),
+    /// made by `nsh_base::nav_page`: its header options and its content (its
+    /// children).
     Screen
 }
 
 host_element! {
-    /// A modal (`<modal>`), made by [`modal`]: presented while it is in the
-    /// view, over everything else; its children are its content.
+    /// A dialog (`<modal>`, TS: `Dialog` of `nsh/base`), made by
+    /// `nsh_base::dialog`: presented while it is in the view, over everything
+    /// else; its children are its content.
     Modal
 }
 
@@ -238,12 +244,14 @@ pub fn scroll() -> Scroll {
 /// A native navigation stack of [`screen`]s: put a screen in to push it,
 /// leave it out to pop it. Give each screen a [`Element::key`] (its route)
 /// so the screens below keep their state.
+#[deprecated(note = "use nsh_base::nav_stack, as TSX's `NavStack` of `nsh/base`")]
 pub fn stack() -> Stack {
     Stack(ElNode::new(Tag::Stack))
 }
 
 /// A screen of a [`stack`]. What it shows reads its insets below the
 /// header ([`super::Scope::insets`]).
+#[deprecated(note = "use nsh_base::nav_page, as TSX's `NavPage` of `nsh/base`")]
 pub fn screen() -> Screen {
     let mut node = ElNode::new(Tag::Screen);
     // Its insets come with this event.
@@ -253,6 +261,7 @@ pub fn screen() -> Screen {
 
 /// A modal presenting its children. Put it in the view to present it (in
 /// a region: [`super::If`]), leave it out to dismiss it.
+#[deprecated(note = "use nsh_base::dialog, as TSX's `Dialog` of `nsh/base`")]
 pub fn modal() -> Modal {
     let mut node = ElNode::new(Tag::Modal);
     // Its insets (`Scope::insets` inside it) come with this event.
@@ -295,10 +304,11 @@ pub fn canvas(painter: impl IntoReactive<Painter>) -> CanvasView {
 
 crate::static_reactive!(Painter: Painter, Drawing);
 
-/// A web view loading `url`.
-pub fn web_view(url: &str) -> WebView {
-    WebView(ElNode::new(Tag::WebView))
-        .set(Prop::Native(NativeProp::Source(WebSource::Uri(url.into()))))
+/// A web view loading `url` (a bound one loads again when it changes).
+pub fn web_view(url: impl IntoReactive<String>) -> WebView {
+    WebView(ElNode::new(Tag::WebView)).bind_prop(url, |url: String| {
+        Prop::Native(NativeProp::Source(WebSource::Uri(url.into())))
+    })
 }
 
 /// A web view showing the page `html`, its relative links resolved against
@@ -307,9 +317,12 @@ pub fn web_view_html(html: impl IntoReactive<String>, base_url: Option<&str>) ->
     WebView(ElNode::new(Tag::WebView)).html(html, base_url)
 }
 
-/// A video playing the file or stream at `url`.
-pub fn video(url: &str) -> Video {
-    Video(ElNode::new(Tag::Video)).set(Prop::Native(NativeProp::Source(WebSource::Uri(url.into()))))
+/// A video playing the file or stream at `url` (a bound one plays the new
+/// one when it changes).
+pub fn video(url: impl IntoReactive<String>) -> Video {
+    Video(ElNode::new(Tag::Video)).bind_prop(url, |url: String| {
+        Prop::Native(NativeProp::Source(WebSource::Uri(url.into())))
+    })
 }
 
 /// The embedder's native component registered as `name`.
@@ -479,6 +492,17 @@ impl Input {
         self.listen(EventKind::KeyPress, listener.into_listener(), events::key)
     }
 
+    /// An input method's composition started, changed or ended (the text
+    /// being composed, empty once it ends): the text is the input's only
+    /// once committed, reported by [`Self::on_change`] first.
+    pub fn on_composition_change<M>(self, listener: impl IntoListener<Composition, M>) -> Self {
+        self.listen(
+            EventKind::CompositionChange,
+            listener.into_listener(),
+            events::composition,
+        )
+    }
+
     /// The text's size changed (multiline inputs growing).
     pub fn on_content_size_change<M>(self, listener: impl IntoListener<Size<Points>, M>) -> Self {
         self.listen(
@@ -572,9 +596,44 @@ impl Screen {
 
     /// The header's colors: `backgroundColor`, `color` (the title's) and
     /// `tintColor` (the buttons'), as [`super::Style::from_decls`] makes
-    /// them (TS: `headerStyle`).
-    pub fn header_style(self, style: impl IntoReactive<super::Style>) -> Self {
-        self.bind_prop(style, |s: super::Style| Prop::HeaderStyle(s.0))
+    /// them (TS: `headerStyle`); a style of typed styles applies as
+    /// [`Self::header_style_with`]'s do.
+    pub fn header_style(mut self, style: impl IntoReactive<super::Style>) -> Self {
+        let style = match style.into_reactive() {
+            // Its bound parts are read in the binding, which follows them.
+            super::Reactive::Static(s) if s.1.is_bound() => {
+                super::Reactive::Bound(std::rc::Rc::new(move || s.clone()))
+            }
+            style => style,
+        };
+        self.0.bind_attr(style, |a, s: super::Style| {
+            set_in(&mut a.props, Prop::HeaderStyle(s.0));
+            if !s.1.is_empty() {
+                let typed = s.1.resolved();
+                let list = (!typed.is_empty()).then(|| Arc::new(typed.lower()));
+                set_in(&mut a.props, Prop::HeaderClassList(list));
+            }
+        });
+        self
+    }
+
+    /// The header's colors as typed styles: the background
+    /// ([`super::Styled::bg`]), the title's color
+    /// ([`super::Styled::text_color`]) and the buttons'
+    /// ([`super::Styled::tint_color`]), theme colors following the
+    /// appearance natively (TS: `headerClass`). `f` runs again when what it
+    /// reads changes. [`Self::header_style`] wins over it, key by key.
+    pub fn header_style_with(
+        self,
+        f: impl Fn(super::StyleRefinement) -> super::StyleRefinement + 'static,
+    ) -> Self {
+        let list = move || {
+            let style = f(super::StyleRefinement::default()).resolved();
+            (!style.is_empty()).then(|| Arc::new(style.lower()))
+        };
+        self.bind_prop(super::Reactive::Bound(std::rc::Rc::new(list)), |list| {
+            Prop::HeaderClassList(list)
+        })
     }
 
     /// The label of the back button leading back to this screen (iOS).
@@ -948,9 +1007,13 @@ impl Video {
 }
 
 impl NativeView {
-    /// Its prop `name` (any JSON value), as JS's `nativeComponent` passes it.
-    pub fn prop(self, name: &str, value: JsonValue) -> Self {
-        self.set(Prop::ComponentProp(name.into(), Some(value)))
+    /// Its prop `name` (any JSON value), as JS's `nativeComponent` passes it;
+    /// a bound one is passed again when it changes.
+    pub fn prop(self, name: &str, value: impl IntoReactive<JsonValue>) -> Self {
+        let name: Arc<str> = name.into();
+        self.bind_prop(value, move |value| {
+            Prop::ComponentProp(name.clone(), Some(value))
+        })
     }
 
     /// It emitted an event.
@@ -1122,7 +1185,7 @@ impl Painter {
 
     /// Whether `point` (in the canvas, as a touch's location) is inside the
     /// current path by `rule`, with the transform, as recorded so far (TS:
-    /// `ctx.isPointInPath(x, y, rule)`). Answered from the geometry here,
+    /// `cx.isPointInPath(x, y, rule)`). Answered from the geometry here,
     /// with no platform round trip; a number given as an animated value
     /// counts as 0, as in TS. To find what is under a tap, build the
     /// canvas's painter in a function the press handler calls too.
@@ -1131,14 +1194,14 @@ impl Painter {
     }
 
     /// Whether `point` is on the stroke of the current path with the line
-    /// width and cap recorded so far (TS: `ctx.isPointInStroke(x, y)`;
+    /// width and cap recorded so far (TS: `cx.isPointInStroke(x, y)`;
     /// round joins, no dashes). See [`Self::is_point_in_path`].
     pub fn is_point_in_stroke(&self, point: Point<Points>) -> bool {
         crate::canvas::point_in_stroke(&self.drawing.ops, None, point, |_| 0.0)
     }
 
     /// Whether `point` is inside `path` by `rule`, with the transform
-    /// recorded so far (TS: `ctx.isPointInPath(path2d, x, y, rule)`): the
+    /// recorded so far (TS: `cx.isPointInPath(path2d, x, y, rule)`): the
     /// shape [`Self::fill_path`] drew under a tap. See
     /// [`Self::is_point_in_path`].
     pub fn path_contains(&self, path: &Path, point: Point<Points>, rule: FillRule) -> bool {
@@ -1146,7 +1209,7 @@ impl Painter {
     }
 
     /// Whether `point` is on the stroke of `path` with the transform, line
-    /// width and cap recorded so far (TS: `ctx.isPointInStroke(path2d, x,
+    /// width and cap recorded so far (TS: `cx.isPointInStroke(path2d, x,
     /// y)`). See [`Self::is_point_in_path`].
     pub fn stroke_contains(&self, path: &Path, point: Point<Points>) -> bool {
         crate::canvas::point_in_stroke(&self.drawing.ops, Some(path), point, |_| 0.0)

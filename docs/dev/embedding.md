@@ -1,6 +1,6 @@
 # Packaging and embedding
 
-- `nsh package <entry> --target ios|ios-simulator|android|linux|macos|windows|gpui` builds an installable app from the prebuilt runtime: metadata from
+- `nsh package <entry> --target ios|ios-simulator|android|linux|macos|windows` builds an installable app from the prebuilt runtime: metadata from
   `nsh.json` next to the entry (`name`, `id`, `version`, `build`, `icon`; `appearance` also sets `UIUserInterfaceStyle`
   and a dark window theme, so the launch screen is in it) or flags. iOS: `.app`, `.ipa` with `--sign <identity>
   --profile <file.mobileprovision>` (entitlements come from the profile; icons are compiled by `actool` into `Assets.car`).
@@ -20,11 +20,8 @@
   `nsh\bundle.nshc`, `nsh\assets\` and `nsh\app.json` (the window title, the app id, which groups the app's windows in
   the taskbar, the version and the appearance, which the window opens in); plus the same as `<name>.zip`. No tools
   are needed; `--run` launches the executable.
-  GPUI: packaged as the native apps of the machine it runs on are (Linux's directory and `.tar.gz`, macOS' `.app`,
-  Windows' directory and `.zip`), with the GPUI release runner (`crates/gpui/nsh-gpui-app`) as the executable; it finds
-  `nsh/` next to itself, or `Contents/Resources/nsh` inside an app bundle (`nsh_gpui_app::resources`). The Linux
-  runner links WebKitGTK 4.1 (GTK 3) and GStreamer dynamically (features `webview`, `video`): they must be installed
-  where the package runs, as GTK 4 must for Linux packages.
+  GPUI is the backend for embedding in GPUI and GPUI Kit apps (below), which ship it in their own executable: `nsh
+  package` refuses `--target gpui` and names this OS's target, the one backend each desktop packages apps with.
 - Embedding: iOS apps link `NativeShell.xcframework` and `import NativeShell` (Swift: `NshAppView`, a `UIView`;
   `NshTrust`, `NshPackage`, `NshLimits`, `NshError`); Android apps add `nsh.aar` and use `com.longbridge.nsh.NshView`.
   `*Dev` / `-dev` variants can also load from a dev server. See `examples/embed-*`. Rust desktop apps use the platform
@@ -93,7 +90,20 @@
   evolution (`.swiftinterface`: apps on other Swift compilers can import it). The Swift module imports the C ABI's
   module `NativeShellC` with `internal import`, so it is neither in the interface nor shipped; its module map's `link`
   lines become autolink entries of the Swift objects (apps link nothing but the framework). Catalyst frameworks use the
-  versioned macOS layout and Swift needs the SDK's `iOSSupport` paths. The C functions return errors as strings
+  versioned macOS layout and Swift needs the SDK's `iOSSupport` paths. The Rust static library goes in as one
+  relocatable object (`ld -r` with an exported symbols list) that exports only the C ABI (`_nsh_*`): Rust's runtime
+  (`rust_eh_personality`), the standard library and QuickJS (`JS_*`) become local, so apps that link another Rust
+  static library (each defines `rust_eh_personality`) or QuickJS link NativeShell without duplicate symbols (with
+  `-dead_strip` the linker only warns and keeps one of them, which the other runtime then unwinds with).
+  Hiding the symbols is not always enough: an image's compact unwind table encodes at most three personality routines,
+  and an app that already has the Objective-C and C++ ones plus another Rust library's (`rust_eh_personality`, which
+  NSH's local copy then adds to) fails to link with "Too many personality routines for compact unwind". `--dynamic`
+  builds dynamic frameworks instead (the Swift module and the runtime object linked with `swiftc -emit-library`,
+  `-dead_strip`, installed at `@rpath/NativeShell.framework/NativeShell`), which the app embeds: the runtime gets an
+  image, and an unwind table, of its own.
+  `cargo xtask ios-embed` options: `--dynamic`; `--x86-64-simulator` adds the x86_64 simulator architecture (merged
+  with arm64 by `lipo`: apps whose simulator builds run under Rosetta; `rustup target add x86_64-apple-ios`);
+  `--no-catalyst` and `--no-dev` leave out the Catalyst slice and `NativeShellDev`. The C functions return errors as strings
   (`nsh_string_free`) that Swift throws as `NshError`; the error handler's context is released by a callback.
 
 ## GPUI and GPUI Kit apps
@@ -127,9 +137,9 @@ NSH draws (`src/layers.rs`).
 - **Overlays.** The surface draws only inside its bounds and takes the mouse only on its hitbox: GPUI Kit's dialogs,
   sheets, popovers and notifications (drawn by `Root` above the content) cover it and take the input, while its app
   keeps running.
-- **The host's theme in NSH.** `AppView::set_theme(Some(theme), cx)` gives the surface a `nsh_core::ui::Theme`
-  (re-exported as `nsh_platform_gpui::Theme`) and `set_theme_json(json, cx)` one in gpui-kit's JSON: the Rust
-  components (the app's UI sets) render with it instead of the app's own theme (`Core::set_host_theme`, which wins until cleared with
+- **The host's theme in NSH.** `AppView::set_theme(Some(theme), cx)` gives the surface a `nsh_base::Theme`
+  (re-exported as `nsh_platform_gpui::Theme`) and `set_theme_json(json, cx)` one in gpui-kit's JSON: the app
+  renders with its tokens instead of its own theme's (`Core::set_host_tokens`, which win until cleared with
   `None`), and the surface is drawn on its `background`. The app's classes naming its tokens (`bg-primary`,
   `bg-sidebar`, `rounded-(--radius)`; every key of the theme, so a GPUI Kit theme's own keys too) restyle with it;
   keys it lacks keep the app's values. It applies at once and to every app loaded later, in their
@@ -158,7 +168,7 @@ NSH draws (`src/layers.rs`).
   among the app's text fields, and a click focuses that handle too.
 - **Limits.** `AppOptions::limits` (or `AppView::set_limits`, from the next load) are the VM limits of the apps the
   view runs, as `NshAppView.limits` and `NshView.setLimits` on iOS and Android: `Limits::default()` (an app embedded
-  in another app) unless set; `nsh-gpui-host` and `nsh-gpui-app` run apps on their own, with `Limits::standalone()`
+  in another app) unless set; the development host `nsh-gpui-host` runs apps on its own, with `Limits::standalone()`
   (`sandbox.md`).
 - **Storage.** Each app keeps `nsh/storage` in `<data dir>/<app id>/storage.json`, which the engine picks
   (`EngineConfig::data_dir`, `app_dir_name(App::app_id())`, `default` without a valid id): the id travels with the app

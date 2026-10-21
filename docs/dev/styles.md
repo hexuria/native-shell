@@ -29,13 +29,13 @@
   extended by `nsh.json` `"tailwind"` (`colors`, `spacing`, `breakpoints`, `fontSize`, `radius`, `shadow`, ...; unknown
   keys are build errors). Rust components do not use classes: their typed styles (`ui/style.rs`, every utility group has its
   methods, tested against the classes) lower into the same rules and their
-  colors come from the component theme, `nsh.json` `"theme"` (`docs/dev/components.md`); the Tailwind theme only
-  shapes the app's own classes. The app's classes name the component theme's tokens (`tailwind/theme.rs` `Tokens`:
-  every color and number of the theme by its key, dots as dashes, `.background` optional; `bg-primary` when the
+  colors come from `nsh/base`'s theme, `nsh.json` `"theme"` (`docs/dev/components.md`); the Tailwind theme only
+  shapes the app's own classes. The app's classes name the design tokens (`ui::Tokens`, by the names of
+  `tailwind/theme.rs` `ClassTokens`: every color and number by its key, dots as dashes, `.background` optional; `bg-primary` when the
   Tailwind theme has no such color, `rounded-(--radius)`): such a utility is parsed with the light and the dark
-  values as arbitrary ones (two rules of its rank when they differ) and depends on `deps::THEME`. When the theme the
-  components draw with changes (`Core::set_theme`, `set_host_theme`; a host theme keeps the app's custom keys it
-  lacks, `ui::Theme::inherit`), `Core::theme_tokens_changed` drops the cached strings that name tokens and resolves
+  values as arbitrary ones (two rules of its rank when they differ) and depends on `deps::THEME`. When the design
+  tokens the app draws with change (`Core::set_tokens`, `set_host_tokens`; a host's keep the app's keys they lack,
+  `Tokens::over`), `Core::class_tokens_changed` drops the cached strings that name tokens and resolves
   their nodes (and the app's classes on Rust components) again; when the names change, every class. `nsh build` / `nsh dev` warn about unknown static classes in app code (`file:line:col:
   unknown class '...'`, target `nsh::build`); the core logs each unknown class once at run time. Class-only settings
   that are props in React Native (`line-clamp-*`, `truncate`, `whitespace-nowrap`, `pointer-events-*`, `object-*`,
@@ -54,7 +54,7 @@
   gradients `encode.rs` sends as written, with their stop count negated; the web hands them to the browser as `px`), or
   at angles around conic ones (fractions of a turn), up to two per stop; transition hints are not parsed; a gradient
   that does not parse is logged (inline styles, `bg-[…]` classes, Rust components' `Style`); but press feedback must show, so a background color an interaction state sets (`active:` / `hover:` / `focus:` /
-  `focus-within:` / `group-*:` classes, Rust components' `.active(..)`, `activeStyle` / `hoverStyle` / `focusStyle` / `disabledStyle`) or a native
+  `focus-within:` / `group-*:` classes, Rust components' `.active(..)`, on a nested component's element too, `activeStyle` / `hoverStyle` / `focusStyle` / `disabledStyle`) or a native
   animation drives (`Animated` `backgroundColor`) replaces the gradients, unless that state sets a gradient of its own:
   done in the core, so every platform shows it alike), `filter` (`brightness`, `contrast`,
   `grayscale`, `hue-rotate`, `invert`, `saturate`, `sepia`, `opacity`, `blur`, `drop-shadow`; color filters are composed into one
@@ -132,7 +132,7 @@ setters), and nowhere earlier.
 
 Adjusting a color is a method of `Hsla`, so state colors are derived rather than picked (the theme's pressed shades
 are `c.blend(opaque_grey(0.0, 0.12))` in light appearance and `opaque_grey(1.0, 0.12)` in dark,
-`ui/theme.rs` `pressed`):
+`nsh-base`'s `theme.rs` `pressed`):
 
 | Method | Does |
 |---|---|

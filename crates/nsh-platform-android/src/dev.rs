@@ -61,8 +61,25 @@ impl DevSession {
                 .iter()
                 .filter_map(|set| set.specifier().map(str::to_owned))
                 .collect(),
+            tests: true,
         };
+        // A test session (`nsh test --target android`): the host keeps the
+        // model the agent's steps see, from the first bundle on (the
+        // client's events come in order on its thread).
+        let tested = weak.clone();
+        let tester = nsh_testing::agent::Tester::new(move |model| {
+            let density = tested.upgrade().map_or(1.0, |host| {
+                *host.test_model.lock().unwrap_or_else(|e| e.into_inner()) = Some(model);
+                host.density()
+            });
+            Box::new(crate::agent::AndroidNative::new(tested.clone(), density))
+        });
+        let tests = tester.clone();
         let started = DevClient::start(url, host_info, move |event| {
+            // Taken here: a step waits for what it does on the UI thread.
+            let Some(event) = tests.event(event) else {
+                return;
+            };
             match event {
                 DevEvent::Connected => CONNECTED.store(true, Ordering::Relaxed),
                 DevEvent::Disconnected => CONNECTED.store(false, Ordering::Relaxed),
@@ -75,6 +92,7 @@ impl DevSession {
         match started {
             Ok(client) => {
                 let client = Arc::new(client);
+                tester.set_client(&client);
                 *CLIENT.lock().unwrap_or_else(|e| e.into_inner()) = Arc::downgrade(&client);
                 Some(DevSession {
                     _client: client,
@@ -113,6 +131,30 @@ fn handle(host: &Arc<Host>, state: &Mutex<DevState>, event: DevEvent) {
     match event {
         DevEvent::Connected => host.dev_status(None),
         DevEvent::Disconnected => host.dev_status(Some("Dev server disconnected — reconnecting…")),
+        // The client's thread hands them to the test agent.
+        DevEvent::Testing
+        | DevEvent::Step { .. }
+        | DevEvent::TestSetup { .. }
+        | DevEvent::Fetch { .. } => {}
+        DevEvent::Root => {
+            host.dev_status(None);
+            let Some(root) = crate::app_root() else {
+                return host.dev_error(
+                    Some((
+                        "This host cannot run the app",
+                        "The app is of Rust only, and this host was not built with its root.",
+                    )),
+                    true,
+                );
+            };
+            {
+                let mut state = state.lock().expect("dev state");
+                state.latest = None;
+                state.running = None;
+            }
+            host.dev_error(None, false);
+            host.load(root);
+        }
         DevEvent::Building => {}
         DevEvent::BuildFailed(message) => host.dev_error(Some(("Build failed", &message)), false),
         DevEvent::CannotRun { message, .. } => {

@@ -3,12 +3,10 @@
 //! ([`decode_animation_op`], as `nsh/animated` encodes them) and JSON
 //! ([`to_json`]).
 
-use nsh_animation::{
-    AnimationOp, AnimationProp, Driver, Easing, Extrapolate, MathOp, Operand, Output,
-};
 use nsh_core::{
     Color, Command, EventKind, LayoutAnimation, NodeId, Op, Prop, Style, StyleDecl, StyleError,
     StylePatch, StyleValue, TransformKind,
+    animation::{AnimationOp, AnimationProp, Driver, Easing, Extrapolate, MathOp, Operand, Output},
     geometry::{Percentage, Points, point, px},
     js::{
         host::{HostCx, HostInput, HostList, HostProps, HostValue},
@@ -60,7 +58,7 @@ impl Warnings {
 }
 
 struct Reader<'a, 'js> {
-    ctx: &'a Ctx<'js>,
+    cx: &'a Ctx<'js>,
     buf: &'a Array<'js>,
     pos: usize,
 }
@@ -78,7 +76,7 @@ impl<'js> Reader<'_, 'js> {
         let v = self.value()?;
         v.as_int()
             .or_else(|| v.as_float().map(|f| f as i32))
-            .ok_or_else(|| Exception::throw_type(self.ctx, "nsh/animated: expected an integer"))
+            .ok_or_else(|| Exception::throw_type(self.cx, "nsh/animated: expected an integer"))
     }
 
     #[inline]
@@ -86,14 +84,14 @@ impl<'js> Reader<'_, 'js> {
         let v = self.value()?;
         v.as_number()
             .map(|n| n as f32)
-            .ok_or_else(|| Exception::throw_type(self.ctx, "nsh/animated: expected a number"))
+            .ok_or_else(|| Exception::throw_type(self.cx, "nsh/animated: expected a number"))
     }
 
     fn numbers(&mut self) -> rquickjs::Result<Vec<f32>> {
         let v = self.value()?;
         let Some(items) = v.as_array() else {
             return Err(Exception::throw_type(
-                self.ctx,
+                self.cx,
                 "nsh/animated: expected an array",
             ));
         };
@@ -107,7 +105,7 @@ impl<'js> Reader<'_, 'js> {
             (Some(n), _) => Ok(Operand::Const(n as f32)),
             (_, Some(node)) => Ok(Operand::Node(node)),
             _ => Err(Exception::throw_type(
-                self.ctx,
+                self.cx,
                 "nsh/animated: expected a number or animated value",
             )),
         }
@@ -119,7 +117,7 @@ impl<'js> Reader<'_, 'js> {
         match v.as_string() {
             Some(s) => s.to_string(),
             None => Err(Exception::throw_type(
-                self.ctx,
+                self.cx,
                 "nsh/animated: expected a string",
             )),
         }
@@ -129,10 +127,10 @@ impl<'js> Reader<'_, 'js> {
 /// Decodes an animation operation, encoded as `nsh/animated` builds it
 /// (`ANIMATION_*`, the node, then the operation's values).
 pub(crate) fn decode_animation_op<'js>(
-    ctx: &Ctx<'js>,
+    cx: &Ctx<'js>,
     buf: &Array<'js>,
 ) -> rquickjs::Result<AnimationOp> {
-    decode_animation(&mut Reader { ctx, buf, pos: 0 })
+    decode_animation(&mut Reader { cx, buf, pos: 0 })
 }
 
 /// The command `name` with argument `arg` sends to a node's view (`None`:
@@ -240,7 +238,7 @@ pub(crate) fn decode_command<'js>(
 }
 
 /// Reads the node id of an animated value object (`{ __av: id }`).
-fn animated_value(value: &Value<'_>) -> Option<nsh_animation::NodeId> {
+fn animated_value(value: &Value<'_>) -> Option<nsh_core::animation::NodeId> {
     value
         .as_object()?
         .get::<_, Option<u32>>("__av")
@@ -596,14 +594,14 @@ fn parse_angle(s: &str) -> Option<f32> {
 
 fn decode_animation(r: &mut Reader<'_, '_>) -> rquickjs::Result<AnimationOp> {
     let sub = r.int()?;
-    let node = r.int()? as nsh_animation::NodeId;
+    let node = r.int()? as nsh_core::animation::NodeId;
     Ok(match sub {
         ANIMATION_VALUE => AnimationOp::CreateValue {
             node,
             value: r.number()?,
         },
         ANIMATION_INTERPOLATE => {
-            let input = r.int()? as nsh_animation::NodeId;
+            let input = r.int()? as nsh_core::animation::NodeId;
             let input_range = r.numbers()?;
             let outputs = r.value()?;
             let output = decode_output(r, &outputs)?;
@@ -627,7 +625,7 @@ fn decode_animation(r: &mut Reader<'_, '_>) -> rquickjs::Result<AnimationOp> {
         }
         ANIMATION_DIFF_CLAMP => AnimationOp::CreateDiffClamp {
             node,
-            input: r.int()? as nsh_animation::NodeId,
+            input: r.int()? as nsh_core::animation::NodeId,
             min: r.number()?,
             max: r.number()?,
         },
@@ -661,9 +659,9 @@ fn decode_animation(r: &mut Reader<'_, '_>) -> rquickjs::Result<AnimationOp> {
             value: r.number()?,
         },
         ANIMATION_START => {
-            let animation = r.int()? as nsh_animation::AnimationId;
+            let animation = r.int()? as nsh_core::animation::AnimationId;
             let config = r.value()?;
-            let driver = decode_driver(r.ctx, &config)?;
+            let driver = decode_driver(r.cx, &config)?;
             AnimationOp::Start {
                 node,
                 animation,
@@ -680,11 +678,11 @@ fn decode_animation(r: &mut Reader<'_, '_>) -> rquickjs::Result<AnimationOp> {
         ANIMATION_EXTRACT_OFFSET => AnimationOp::ExtractOffset { node },
         ANIMATION_READ => AnimationOp::Read {
             node,
-            request: r.int()? as nsh_animation::AnimationId,
+            request: r.int()? as nsh_core::animation::AnimationId,
         },
         other => {
             return Err(Exception::throw_type(
-                r.ctx,
+                r.cx,
                 &format!("nsh/animated: unknown operation {other}"),
             ));
         }
@@ -694,7 +692,7 @@ fn decode_animation(r: &mut Reader<'_, '_>) -> rquickjs::Result<AnimationOp> {
 fn decode_output(r: &Reader<'_, '_>, outputs: &Value<'_>) -> rquickjs::Result<Output> {
     let Some(items) = outputs.as_array() else {
         return Err(Exception::throw_type(
-            r.ctx,
+            r.cx,
             "interpolate: outputRange must be an array",
         ));
     };
@@ -717,7 +715,7 @@ fn decode_output(r: &Reader<'_, '_>, outputs: &Value<'_>) -> rquickjs::Result<Ou
                 _ => None,
             };
             degrees.push(value.ok_or_else(|| {
-                Exception::throw_type(r.ctx, &format!("interpolate: invalid angle {item:?}"))
+                Exception::throw_type(r.cx, &format!("interpolate: invalid angle {item:?}"))
             })?);
         }
         return Ok(Output::Numbers(degrees));
@@ -726,7 +724,7 @@ fn decode_output(r: &Reader<'_, '_>, outputs: &Value<'_>) -> rquickjs::Result<Ou
         let mut colors = Vec::with_capacity(items.len());
         for item in items.iter::<String>() {
             let color = Color::parse(&item?).ok_or_else(|| {
-                Exception::throw_type(r.ctx, "interpolate: invalid color in outputRange")
+                Exception::throw_type(r.cx, "interpolate: invalid color in outputRange")
             })?;
             colors.push(color.0);
         }
@@ -742,8 +740,8 @@ fn decode_output(r: &Reader<'_, '_>, outputs: &Value<'_>) -> rquickjs::Result<Ou
 }
 
 /// A driver config (`{ type, to, ... }`), as `Animated` passes them.
-pub(crate) fn driver<'js>(ctx: &Ctx<'js>, config: &Value<'js>) -> rquickjs::Result<Driver> {
-    decode_driver(ctx, config)
+pub(crate) fn driver<'js>(cx: &Ctx<'js>, config: &Value<'js>) -> rquickjs::Result<Driver> {
+    decode_driver(cx, config)
 }
 
 /// An `Easing` value (`linear` when it is none).
@@ -751,10 +749,10 @@ pub(crate) fn easing(value: Value<'_>) -> Easing {
     nsh_core::js::animation::easing(&Js(value)).unwrap_or(Easing::Linear)
 }
 
-fn decode_driver(ctx: &Ctx<'_>, config: &Value<'_>) -> rquickjs::Result<Driver> {
+fn decode_driver(cx: &Ctx<'_>, config: &Value<'_>) -> rquickjs::Result<Driver> {
     let Some(c) = config.as_object() else {
         return Err(Exception::throw_type(
-            ctx,
+            cx,
             "animation config must be an object",
         ));
     };
@@ -782,7 +780,7 @@ fn decode_driver(ctx: &Ctx<'_>, config: &Value<'_>) -> rquickjs::Result<Driver> 
                 Some(bounds) if bounds.len() == 2 => Some((bounds[0] as f32, bounds[1] as f32)),
                 Some(_) => {
                     return Err(Exception::throw_type(
-                        ctx,
+                        cx,
                         "decay: `clamp` must be [min, max]",
                     ));
                 }
@@ -792,7 +790,7 @@ fn decode_driver(ctx: &Ctx<'_>, config: &Value<'_>) -> rquickjs::Result<Driver> 
         },
         other => {
             return Err(Exception::throw_type(
-                ctx,
+                cx,
                 &format!("unknown animation type `{other}`"),
             ));
         }
@@ -804,10 +802,10 @@ fn decode_composite(
     r: &Reader<'_, '_>,
     spec: &Value<'_>,
     depth: u32,
-) -> rquickjs::Result<nsh_animation::Composite> {
-    use nsh_animation::Composite;
+) -> rquickjs::Result<nsh_core::animation::Composite> {
+    use nsh_core::animation::Composite;
     let Some(o) = spec.as_object().filter(|_| depth < 64) else {
-        return Err(Exception::throw_type(r.ctx, "animation: invalid composite"));
+        return Err(Exception::throw_type(r.cx, "animation: invalid composite"));
     };
     let children = |key: &str| -> rquickjs::Result<Vec<Composite>> {
         let list: rquickjs::Array = o.get(key)?;
@@ -836,8 +834,8 @@ fn decode_composite(
             reset: o.get::<_, Option<bool>>("reset")?.unwrap_or(true),
         },
         _ => Composite::Run {
-            node: o.get::<_, f64>("node")? as nsh_animation::NodeId,
-            driver: decode_driver(r.ctx, spec)?,
+            node: o.get::<_, f64>("node")? as nsh_core::animation::NodeId,
+            driver: decode_driver(r.cx, spec)?,
         },
     })
 }
@@ -861,9 +859,9 @@ fn json<'js>(
     entries: &mut usize,
 ) -> rquickjs::Result<nsh_core::JsonValue> {
     use nsh_core::JsonValue as J;
-    let too_big = |ctx: &Ctx<'js>| {
+    let too_big = |cx: &Ctx<'js>| {
         Exception::throw_range(
-            ctx,
+            cx,
             &format!(
                 "a native component value is nested deeper than {JSON_DEPTH} or has more than {JSON_ENTRIES} entries"
             ),
@@ -935,11 +933,11 @@ mod decode_bench {
     #[ignore]
     fn bench_canvas_decode() {
         let rt = Runtime::new().unwrap();
-        let ctx = Context::full(&rt).unwrap();
-        ctx.with(|ctx| {
+        let cx = Context::full(&rt).unwrap();
+        cx.with(|cx| {
             // beginPath, moveTo, lineTo, lineWidth =, strokeStyle =, stroke,
             // fillRect.
-            let list: Array = ctx
+            let list: Array = cx
                 .eval(
                     "const out = []; for (let i = 0; i < 2500; i++) { out.push(7, 8, i, 2, 9, i + 1, 3, 26, 2, \
                      25, '#ff0000', 19, null, 21, 0, i, 4, 4); } out",
@@ -960,16 +958,18 @@ mod decode_bench {
 
 #[cfg(test)]
 mod tests {
-    use nsh_animation::{Curve, EaseMode};
-    use nsh_core::{LayoutCurve, LayoutProperty, LayoutTransition};
+    use nsh_core::{
+        LayoutCurve, LayoutProperty, LayoutTransition,
+        animation::{Curve, EaseMode},
+    };
     use rquickjs::{Context, Runtime};
 
     use super::*;
 
     fn with_value<R>(source: &str, f: impl FnOnce(Js<'_>) -> R) -> R {
         let rt = Runtime::new().unwrap();
-        let ctx = Context::full(&rt).unwrap();
-        ctx.with(|ctx| f(Js(ctx.eval(format!("({source})")).unwrap())))
+        let cx = Context::full(&rt).unwrap();
+        cx.with(|cx| f(Js(cx.eval(format!("({source})")).unwrap())))
     }
 
     fn layout(source: &str) -> LayoutAnimation {

@@ -5,6 +5,7 @@
 
 mod android;
 mod build;
+mod cdp;
 mod check;
 mod dev;
 mod entry;
@@ -16,6 +17,10 @@ mod runtime;
 mod rust_app;
 mod sign;
 mod test;
+mod test_android;
+mod test_host;
+mod test_ios;
+mod test_web;
 mod ui;
 mod web;
 mod windows;
@@ -63,7 +68,7 @@ pub(crate) fn set_app_sets(app: Vec<SetDescription>) {
 }
 
 #[derive(Parser)]
-#[command(name = "nsh", version, about = "Build and run nsh apps")]
+#[command(name = "nsh", version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("NSH_GIT_SHA"), ")"), about = "Build and run nsh apps")]
 struct Cli {
     /// Show everything: log lines with their targets, cargo's output and
     /// the hosts' own.
@@ -108,7 +113,7 @@ enum Command {
         #[arg(default_value = ".")]
         entry: PathBuf,
         /// Output directory.
-        #[arg(short, long, default_value = "out")]
+        #[arg(short, long, default_value = ".nsh/out")]
         out: PathBuf,
         /// Minify and strip debug info.
         #[arg(long)]
@@ -141,6 +146,17 @@ enum Command {
         /// format CI services read.
         #[arg(long, value_name = "FILE")]
         junit: Option<PathBuf>,
+        /// Run the apps the tests open on this platform's development host
+        /// instead of headless: the steps act with the platform's own input
+        /// (macos, linux, windows, gpui, web, ios and android; web runs them
+        /// in a headless Chrome, Edge or Chromium, ios in a simulator,
+        /// android on the first device adb lists).
+        #[arg(long, value_enum)]
+        target: Option<run::Target>,
+        /// The Chrome, Edge or Chromium executable `--target web` runs the
+        /// apps in (default: the one installed on this machine).
+        #[arg(long, value_name = "PATH")]
+        browser: Option<PathBuf>,
     },
     /// Type check an app with TypeScript's native compiler (TypeScript 7,
     /// downloaded once from the npm registry; no Node needed).
@@ -156,7 +172,7 @@ enum Command {
         #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Serve an app to dev hosts (simulators, devices) and push rebuilds.
+    /// Run an app in this system’s native host with hot reload.
     Dev {
         /// The entry module, or the app's directory (default: the current one),
         /// whose `App.tsx` is the entry.
@@ -176,16 +192,23 @@ enum Command {
         /// alone runs with. Without it the app runs on its own, with none.
         #[arg(long, value_name = "LIMITS", num_args = 0..=1, default_missing_value = "", value_parser = parse_limits)]
         limits: Option<nsh_core::js::HostLimits>,
+        /// Where to run; defaults to this system's native desktop host.
+        #[arg(long, value_enum, default_value_t = run::Target::native())]
+        target: run::Target,
+        /// iOS simulator to use (name or UDID).
+        #[arg(long)]
+        device: Option<String>,
+        /// Serve hot reload to hosts you start yourself.
+        #[arg(long, conflicts_with_all = ["target", "device"])]
+        server_only: bool,
     },
     /// Package an installable app from the prebuilt runtime (no Rust
     /// needed). Metadata comes from `nsh.json` next to the entry, overridden
     /// by the flags below.
     Package(Box<PackageArgs>),
-    /// Like `dev`, and also run the app in a development host: the Mac
-    /// Catalyst app (default on macOS), the macOS (AppKit) app, the Linux
-    /// app (default on Linux), the Windows app (default on Windows), the
-    /// GPUI app (on any of the three), an iOS simulator, an Android device
-    /// or emulator, or a browser.
+    /// Run an app in a development host with hot reload. Defaults to
+    /// AppKit on macOS, GTK on Linux and Win32 on Windows; select mobile
+    /// hosts, Mac Catalyst, GPUI or a browser with --target.
     Run {
         /// The entry module, or the app's directory (default: the current one),
         /// whose `App.tsx` is the entry.
@@ -228,13 +251,6 @@ enum Command {
         /// `windows`, `gpui`).
         #[arg(long = "window-size", value_name = "WIDTHxHEIGHT")]
         size: Option<String>,
-        /// Script steps to run once the window shows (`wait`, `shot`,
-        /// `tap`, `quit`, ...; the desktop hosts: `--target macos`,
-        /// `linux`, `windows`, `gpui`; an app of Rust only: `macos`,
-        /// `linux`, `windows`). With `quit` the command exits when the
-        /// script does — snapshots without a window staying open.
-        #[arg(long)]
-        script: Option<String>,
     },
     /// Create a signing key: `<name>.secret` (keep it offline for a root)
     /// and `<name>.pub` (what apps trust, for a root).
@@ -275,7 +291,7 @@ enum Command {
         /// Its certificate (`nsh certify`).
         #[arg(long)]
         cert: PathBuf,
-        /// The package to write (default: `out/<id>-<build>.nshpkg`).
+        /// The package to write (default: `.nsh/out/<id>-<build>.nshpkg`).
         #[arg(short, long)]
         out: Option<PathBuf>,
         /// App id, e.g. `com.example.app`.
@@ -358,7 +374,7 @@ struct PackageArgs {
     #[arg(long, value_enum)]
     target: package::PackageTarget,
     /// Output directory.
-    #[arg(short, long, default_value = "out")]
+    #[arg(short, long, default_value = ".nsh/out")]
     out: PathBuf,
     /// Display name.
     #[arg(long)]
@@ -472,7 +488,14 @@ fn run(mut command: Command) -> anyhow::Result<()> {
     // run and packaged.
     let rust_command = matches!(
         command,
-        Command::Build { .. } | Command::Test { .. } | Command::Package(_) | Command::Run { .. }
+        Command::Build { .. }
+            | Command::Test { .. }
+            | Command::Package(_)
+            | Command::Run { .. }
+            | Command::Dev {
+                server_only: false,
+                ..
+            }
     );
     if let Some(entry) = command.entry_mut()
         && rust_app::is_root(entry)
@@ -557,17 +580,46 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             filter,
             trace,
             junit,
-        } => test::test(&path, &entry, filter, trace, junit.as_deref()),
+            target,
+            browser,
+        } => test::test(
+            &path,
+            &entry,
+            filter,
+            trace,
+            junit.as_deref(),
+            target,
+            browser.as_deref(),
+        ),
         Command::Dev {
             entry,
             port,
             release,
             limits,
+            target,
+            device,
+            server_only,
         } => {
             no_limits_for_rust(&entry, limits)?;
-            let session = dev::DevSession::start(&entry, port, release, limits)?;
-            session.print_urls();
-            session.watch(|| Ok(false))
+            if server_only {
+                let session = dev::DevSession::start(&entry, port, release, limits)?;
+                session.print_urls();
+                session.watch(|| Ok(false))
+            } else {
+                run::run(
+                    &entry,
+                    port,
+                    release,
+                    run::HostFlags {
+                        limits,
+                        trace: false,
+                        fps: false,
+                    },
+                    target,
+                    device.as_deref(),
+                    run::HostWindow::default(),
+                )
+            }
         }
         Command::Package(args) => {
             let PackageArgs {
@@ -620,7 +672,6 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             device,
             name,
             size,
-            script,
         } => {
             no_limits_for_rust(&entry, limits)?;
             run::run(
@@ -633,7 +684,6 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
                 run::HostWindow {
                     name: name.as_deref(),
                     size: size.as_deref(),
-                    script: script.as_deref(),
                 },
             )
         }
@@ -686,5 +736,99 @@ fn dispatch(command: Command) -> anyhow::Result<()> {
             packages,
             out,
         } => sign::revoke_list(&root, extend.as_deref(), sequence, &keys, &packages, &out),
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use clap::Parser as _;
+
+    use super::{Cli, Command, run::Target};
+
+    #[test]
+    fn version_includes_the_source_revision() {
+        for flag in ["-V", "--version"] {
+            let error = Cli::try_parse_from(["nsh", flag])
+                .err()
+                .expect("version exits");
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "nsh {} ({})\n",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("NSH_GIT_SHA")
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn generated_outputs_default_to_the_project_cache() {
+        let cli = Cli::try_parse_from(["nsh", "build"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Build { out, .. } if out == std::path::Path::new(".nsh/out"))
+        );
+        let cli = Cli::try_parse_from(["nsh", "package", "--target", "web"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Package(args) if args.out == std::path::Path::new(".nsh/out"))
+        );
+        let cli = Cli::try_parse_from(["nsh", "build", "--out", "custom"]).unwrap();
+        assert!(
+            matches!(cli.command, Command::Build { out, .. } if out == std::path::Path::new("custom"))
+        );
+    }
+
+    #[test]
+    fn dev_and_run_default_to_this_systems_desktop_host() {
+        let expected = if cfg!(target_os = "macos") {
+            Target::Macos
+        } else if cfg!(target_os = "linux") {
+            Target::Linux
+        } else if cfg!(windows) {
+            Target::Windows
+        } else {
+            Target::Web
+        };
+        for command in ["dev", "run"] {
+            let cli = Cli::try_parse_from(["nsh", command]).unwrap();
+            let target = match cli.command {
+                Command::Dev {
+                    target,
+                    server_only: false,
+                    ..
+                }
+                | Command::Run { target, .. } => target,
+                _ => panic!("expected a host command"),
+            };
+            assert_eq!(target, expected);
+        }
+    }
+
+    #[test]
+    fn mobile_hosts_are_selected_explicitly() {
+        for command in ["dev", "run"] {
+            for (value, expected) in [("ios", Target::Ios), ("android", Target::Android)] {
+                let cli = Cli::try_parse_from(["nsh", command, "--target", value]).unwrap();
+                let target = match cli.command {
+                    Command::Dev { target, .. } | Command::Run { target, .. } => target,
+                    _ => panic!("expected a host command"),
+                };
+                assert_eq!(target, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn dev_can_serve_hosts_started_separately() {
+        let cli = Cli::try_parse_from(["nsh", "dev", "--server-only"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Dev {
+                server_only: true,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["nsh", "dev", "--server-only", "--target", "ios"]).is_err());
     }
 }

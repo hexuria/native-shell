@@ -8,6 +8,7 @@
 
 use std::{cell::Cell, ptr};
 
+use nsh_base::{nav_page, nav_stack};
 use nsh_core::{
     storage::Storage,
     ui::{AccessibilityRole, AccessibilityState, AnyElement, prelude::*},
@@ -48,14 +49,14 @@ struct WasDesktop(bool);
 /// pushed and gone when it is popped.
 fn pushed() -> AnyElement {
     let routes = nav::routes();
-    Each::new(
+    each(
         move || routes.with(|r| r.0.clone()),
         |route: &Route| route.key.clone(),
         |route, depth| {
             let route = route.get_untracked();
             (route.screen)()
                 // The user popped it natively: it and what is above it go.
-                .on_dismiss(move |_: &()| nav::truncate(depth.get_untracked()))
+                .on_dismiss(move || nav::truncate(depth.get_untracked()))
         },
     )
     .into_element()
@@ -126,7 +127,7 @@ pub(crate) fn phone() -> AnyElement {
         let Selected(demo) = global::<Selected>().get_untracked();
         nav::reset(vec![demo.route()]);
     }
-    stack()
+    nav_stack()
         .flex_1()
         .child(demos::index())
         .child(pushed())
@@ -151,9 +152,14 @@ pub(crate) fn desktop_layout() -> AnyElement {
         .bg(colors::BACKGROUND)
         .child(sidebar())
         .child(
-            stack()
+            nav_stack()
                 .flex_1()
-                .child(screen().key("pane").header_shown(false).child(demo_pane()))
+                .child(
+                    nav_page()
+                        .key("pane")
+                        .header_shown(false)
+                        .child(demo_pane()),
+                )
                 .child(pushed()),
         )
         .into_element()
@@ -193,7 +199,7 @@ fn sidebar_row(demo: &'static Demo) -> AnyElement {
         .style_when(active, |s| s.bg(fill))
         .hover(|s| s.bg(move || if active() { fill } else { hover }))
         .active(|s| s.bg(fill))
-        .on_press(move |_: &()| select(demo))
+        .on_press(move || select(demo))
         .child(
             view()
                 .absolute()
@@ -205,7 +211,7 @@ fn sidebar_row(demo: &'static Demo) -> AnyElement {
                 .bg(colors::ACCENT)
                 .opacity(move || if active() { 1.0_f32 } else { 0.0 }),
         )
-        .child(icon(demo.icon, 17.0, move || {
+        .child(icon().name(demo.icon).size(17.0).tint(move || {
             if active() {
                 colors::ACCENT
             } else {

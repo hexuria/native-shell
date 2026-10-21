@@ -42,10 +42,10 @@ pub trait HostInput: Sized {
     /// Truthy, as JS sees it.
     fn truthy(&self) -> bool;
     /// The native animation node this value is (`AnimatedNode.__av`).
-    fn animated_node(&self) -> Option<nsh_animation::NodeId> {
+    fn animated_node(&self) -> Option<crate::animation::NodeId> {
         self.field("__av")
             .and_then(|v| v.as_number())
-            .map(|n| n as nsh_animation::NodeId)
+            .map(|n| n as crate::animation::NodeId)
     }
 }
 
@@ -629,6 +629,12 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
         on::INPUT,
         "(e: { key: string }) => void",
         "Before the text changes: `key` is the typed text, `Backspace` or `Enter`.",
+    ),
+    (
+        EventKind::CompositionChange,
+        on::INPUT,
+        "(e: { composing: boolean; text: string }) => void",
+        "An input method's composition started, changed or ended: `text` is what is being composed (pinyin before a character is chosen), empty once it ends. The committed text reaches `onChange` before the composition's end; while composing, the platform holds the `value` the app sets and shows it once the composition ends.",
     ),
     (
         EventKind::ContentSizeChange,

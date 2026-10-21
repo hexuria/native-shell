@@ -70,9 +70,9 @@ use std::{
 };
 
 use gpui::{Font, FontStyle, Hsla, RenderImage, TextRun, WindowTextSystem, px};
-use nsh_animation::AnimationValue;
 use nsh_core::{
     Color,
+    animation::AnimationValue,
     canvas::{
         CanvasFont, CanvasGradient, CanvasOp, CanvasTextAlign, CanvasTextBaseline, Composite,
         Damage, DamageScan, Drawing, FillRule, GradientShape, LineCap, LineJoin, Num, Paint,
@@ -339,8 +339,8 @@ fn load_image(
     uri: &str,
     done: impl FnOnce(Result<sk::Pixmap, String>) + 'static,
 ) {
-    crate::image::load(surface, uri, move |result| {
-        done(result.and_then(|(texture, _)| {
+    crate::image::load_bitmap(surface, uri, move |result| {
+        done(result.and_then(|texture| {
             let image = texture.image();
             let size = image.size(0);
             let bytes = image.as_bytes(0).ok_or("an image without pixels")?;

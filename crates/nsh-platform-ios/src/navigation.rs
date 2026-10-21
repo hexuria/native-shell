@@ -415,6 +415,34 @@ define_class!(
                 unsafe { msg_send![super(self), navigationBar: bar, shouldPopItem: item] }
             }
         }
+
+        /// UIKit sizes a pushed controller's view from the navigation view,
+        /// which is still empty when the stack mounts: autoresizing cannot
+        /// grow a zero size, so the view keeps an empty frame even once the
+        /// navigation view has one. The screen's content is not clipped, so
+        /// it draws correctly, but an empty ancestor drops the whole subtree
+        /// from the accessibility snapshot UI tests read: no element inside
+        /// any screen can be found. Give such a view its parent's bounds.
+        #[unsafe(method(viewDidLayoutSubviews))]
+        fn view_did_layout_subviews(&self) {
+            // SAFETY: calling the superclass implementation.
+            let _: () = unsafe { msg_send![super(self), viewDidLayoutSubviews] };
+            for controller in self.viewControllers().iter() {
+                if !controller.isViewLoaded() {
+                    continue;
+                }
+                let Some(view) = controller.view() else { continue };
+                let Some(parent) = view.superview() else { continue };
+                let size = view.bounds().size;
+                let bounds = parent.bounds();
+                if (size.width <= 0.0 || size.height <= 0.0)
+                    && bounds.size.width > 0.0
+                    && bounds.size.height > 0.0
+                {
+                    view.setFrame(bounds);
+                }
+            }
+        }
     }
 );
 
@@ -879,11 +907,73 @@ impl ModalHost {
             return;
         }
         let block = block2::RcBlock::new(done);
-        self.controller.dismissViewControllerAnimated_completion(
-            self.config.animation != ModalAnimation::None,
-            Some(&block),
-        );
+        let animated = self.config.animation != ModalAnimation::None;
+        // Through the presenter: a modal that presents another one (a sheet
+        // over it) would otherwise only dismiss that one, and stay on
+        // screen with its content already gone (closing a sheet and its
+        // modal together). The presenter dismisses this modal and every
+        // controller above it.
+        match self.controller.presentingViewController() {
+            Some(presenter) => {
+                presenter.dismissViewControllerAnimated_completion(animated, Some(&block))
+            }
+            None => self
+                .controller
+                .dismissViewControllerAnimated_completion(animated, Some(&block)),
+        }
     }
+}
+
+/// The back button a user taps in the header shown over `window`: the
+/// navigation bar's (UIKit draws it, so it is found by what it is).
+#[cfg(feature = "dev")]
+pub(crate) fn back_button(window: &objc2_ui_kit::UIWindow) -> Option<Retained<UIView>> {
+    fn bars(view: &UIView, out: &mut Vec<Retained<UIView>>) {
+        if view.isHidden() || view.alpha() < 0.01 {
+            return;
+        }
+        if view.isKindOfClass(<UINavigationBar as objc2::ClassType>::class()) {
+            out.push(objc2::Message::retain(view));
+        }
+        for sub in view.subviews().iter() {
+            bars(&sub, out);
+        }
+    }
+    fn named(view: &UIView, part: &str) -> bool {
+        view.class().name().to_string_lossy().contains(part)
+    }
+    // A bar button that carries the back chevron's mask.
+    fn back(view: &UIView) -> Option<Retained<UIView>> {
+        let subviews = view.subviews();
+        if named(view, "ButtonBarButton")
+            && !view.isHidden()
+            && view.alpha() > 0.01
+            && subviews.iter().any(|v| named(&v, "BackButton"))
+        {
+            return Some(objc2::Message::retain(view));
+        }
+        subviews.iter().find_map(|v| back(&v))
+    }
+    let mut found = Vec::new();
+    bars(window, &mut found);
+    // The front one: the last drawn.
+    found.iter().rev().find_map(|bar| back(bar))
+}
+
+/// The sheet presented over `window`'s app (a modal), whose swipe down
+/// goes back; `None` without one (alerts are dialogs, not sheets).
+#[cfg(feature = "dev")]
+pub(crate) fn presented_sheet(window: &objc2_ui_kit::UIWindow) -> Option<Retained<UIView>> {
+    let mut top = window.rootViewController()?;
+    let mut sheet = None;
+    while let Some(next) = top.presentedViewController() {
+        if next.isKindOfClass(<objc2_ui_kit::UIAlertController as objc2::ClassType>::class()) {
+            break;
+        }
+        sheet = next.view();
+        top = next;
+    }
+    sheet
 }
 
 /// The view controller whose view contains `view`.

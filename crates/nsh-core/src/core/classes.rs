@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use super::{Core, Key, Kind, NO_KEY, dirty, pressable};
+use super::{Core, Key, Kind, NO_KEY, dirty, disabling_changes};
 use crate::{
     mount::MountItem,
     ops::NodeId,
@@ -191,7 +191,7 @@ impl<M: TextEngine> Core<M> {
             node.states &= !state::DISABLED;
         }
         if node.states != before {
-            if pressable(node.events) {
+            if disabling_changes(node.events) {
                 self.mark(key, dirty::EVENTS);
             }
             // Its accessibility state says it.
@@ -301,6 +301,17 @@ impl<M: TextEngine> Core<M> {
     /// content).
     pub(super) fn set_part_class(&mut self, key: Key, part: Part, names: &str) {
         let classes = (!names.trim().is_empty()).then(|| self.tailwind.classes(names));
+        self.set_part_class_list(key, part, classes);
+    }
+
+    /// Sets `part`'s classes of `key` to `classes`, already parsed (typed
+    /// styles lowered); none clears them.
+    pub(super) fn set_part_class_list(
+        &mut self,
+        key: Key,
+        part: Part,
+        classes: Option<Arc<ClassList>>,
+    ) {
         let node = &mut self.nodes[key as usize];
         let base = node.classes.clone();
         let parts = node.parts.get_or_insert_with(|| {
@@ -504,11 +515,11 @@ impl<M: TextEngine> Core<M> {
         }
     }
 
-    /// The components' theme changed: classes naming its tokens
+    /// The design tokens changed: classes naming them
     /// (`bg-primary`) are resolved again, on nodes and on Rust components.
-    pub(super) fn theme_tokens_changed(&mut self) {
-        let theme = self.components.theme.clone();
-        let Some(changed) = self.tailwind.set_tokens(&theme) else {
+    pub(super) fn class_tokens_changed(&mut self) {
+        let tokens = self.components.tokens.clone();
+        let Some(changed) = self.tailwind.set_tokens(&tokens) else {
             return;
         };
         let reads =
@@ -534,6 +545,24 @@ impl<M: TextEngine> Core<M> {
             .collect();
         for host in hosts {
             self.update_user_class(host);
+        }
+        // The app's classes on the views' elements (`app_class`).
+        let nodes: Vec<_> = self
+            .components
+            .app_classes
+            .iter()
+            .map(|(&id, entry)| (id, entry.clone()))
+            .collect();
+        for (id, (own, class, outer)) in nodes {
+            let app = self.app_class_list(&class);
+            let user = self.merge_user(Some(app), outer);
+            let list = match (own, user) {
+                (Some(a), Some(b)) => Some(Arc::new(a.merged(&b))),
+                (a, b) => a.or(b),
+            };
+            if let Ok(key) = self.key(id) {
+                self.set_class_list(key, list);
+            }
         }
     }
 

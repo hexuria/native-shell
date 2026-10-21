@@ -66,7 +66,15 @@ downloaded from the npm registry's tarball URL the first time (ureq, no npm clie
 and the integrities (`npm view @typescript/typescript-<os>-<arch>@<version> dist.integrity`). The distribution
 (`cargo xtask dist`) does not ship the compiler: it is 24 MB per platform and most runs of `nsh` never check types.
 
+## Project files
+
+NSH-generated declarations, runner workspaces, tests and default build/package outputs live under `.nsh/`.
+Default bundles and packages are `.nsh/out/`; `--out` still overrides that location. Cargo keeps its normal
+`target/` cache and existing `CARGO_TARGET_DIR` behavior. NSH does not add Cargo configuration to relocate it.
+Existing directories are never deleted automatically. Follow the CoC project constraint in `AGENTS.md`.
+
 ## Output
+
 
 The CLI's terminal output is `crates/nsh-cli/src/ui.rs` (`website/docs/cli.md`, "Output", shows it): one line per
 step, the details only when something fails. Every command prints through it:
@@ -111,12 +119,13 @@ before every `cargo run`): `✓` lines for its builds, cargo's and the tools' ou
   runtime in a checkout and prints the page's address (`docs/dev/web.md`, "The CLI's web target").
 - Watching ignores `Access` events: inotify (Linux) reports reads, FSEvents does not, so the build's own reads of the
   sources would start the next build, forever.
-- `nsh run` defaults to the host that runs on this machine: `--target catalyst` on macOS, `--target linux` (the GTK
+- `nsh dev` and `nsh run` default to the host that runs on this machine: `--target macos` on macOS, `--target linux` (the GTK
   host, `crates/nsh-linux-host`, run in place: it needs no app bundle) on Linux, `--target windows` (the Win32 host,
   `crates/nsh-windows-host`, run in place too) on Windows. `--target macos` runs the AppKit host
   (`crates/nsh-macos-host`) in place too: it makes itself a regular app without a bundle. `--target gpui` runs the
-  GPUI host (`crates/gpui/nsh-gpui-host`) in place on any of the three; GPUI hosts report `HostPlatform::Gpui`, so the dev
-  server shows them `nsh run --target gpui`. The hosts are stopped with the run
+  GPUI host (`crates/gpui/nsh-gpui-host`) in place on any of the three: it shows a TSX app as GPUI apps that embed it
+  show it (GPUI is the backend for embedding; a Rust app of Rust only runs on the OS's own backend). GPUI hosts report
+  `HostPlatform::Gpui`, so the dev server shows them `nsh run --target gpui`. The hosts are stopped with the run
   (Ctrl-C, SIGTERM, the session ending); a host that exits with an error ends it with its kept output. On Windows the host starts in a
   process group of its own (`CREATE_NEW_PROCESS_GROUP`), out of the console's Ctrl-C, so a stop is not taken for the
   host failing, and in a job object that kills it when the job closes (`run::KillOnClose`): Windows ends a child with
@@ -127,8 +136,8 @@ before every `cargo run`): `✓` lines for its builds, cargo's and the tools' ou
   the next run sets it again). Otherwise a host left on the device keeps reaching whatever dev server listens on that port
   next, of any app. Ctrl-C reaches the run through `ui::Stoppable`: while one is held, the signal handler records
   SIGINT / SIGTERM instead of ending the process, the dev session's watch loop returns, the command undoes what it set
-  up, and `main` then ends the process by the same signal; a second signal ends it at once. `nsh dev` sets nothing
-  up on devices.
+  up, and `main` then ends the process by the same signal; a second signal ends it at once. `nsh dev --server-only` serves hosts started separately. Mobile targets
+  use an explicit `--target ios` or `--target android`.
 - Hosts that cannot run the app: several hosts on one session is intended (a phone joining), but a host serves only the
   UI sets it was built with, and dev hosts keep reconnecting, so a host built for another app (an Android host left on
   the emulator, whose `adb reverse` still reaches this port) can connect. The hello reports the host's platform and
@@ -249,7 +258,7 @@ responses back as the clock's alarms. Quiet detection and `waitFor` timeouts sta
 Headless runs play the platform's part NSH's protocol defines, and refuse what only a real platform does
 (`headless/mod.rs` `Headless::react`, `go_back`, `answer`; `headless/animation.rs`):
 
-- the native animation graph (`nsh-animation`, platform-free) runs frame by frame at 60 Hz while anything animates,
+- the native animation graph (nsh-core's `animation`, platform-free) runs frame by frame at 60 Hz while anything animates,
   fed the mount items' animation ops and scroll values, its finished animations reported (`animations_finished`); a
   step is quiet only when nothing animates;
 - a back (`Headless::back`, and the app's `Command::Back`) does what `nsh-platform-macos`'s `default_back` does: in the
@@ -261,8 +270,8 @@ Headless runs play the platform's part NSH's protocol defines, and refuse what o
   them after each step itself (`answer_dialogs_myself`), so its JS handler runs on the test file's VM;
 - the clipboard holds text (`SetClipboard`, `ReadClipboard` answered with `onClipboard`), modals get `onShow` when
   inserted;
-- images are not loaded; an image's size (`ImageInfo`) and an image or files on the clipboard fail the step that asked
-  (`Screen::take_unsupported`).
+- images are not loaded: an image's size (`ImageInfo`) is answered with an error, as a failed load (a `TextView` asks
+  for the sizes of its images); an image or files on the clipboard fail the step that asked (`Screen::take_unsupported`).
 
 Rust tests use the driver directly: `nsh_testing::start` (the engine with its frames, the batches to the caller),
 `Screen` (texts in tree order, the commands sent, `press_target`, `matches`, `input_text`) and `Headless`.
@@ -322,7 +331,105 @@ each entry (`RunnerMessage::Build` on its stderr, one JSON line), `nsh` writes t
 `.nsh/test/build` and answers with a `Reply` on the runner's stdin, or `Reply::Root` for a Rust app's `nsh.json` (or its
 directory): the runner then makes the app's root (`app_root()`), so `open(".")` starts a Rust app. Results, file
 failures and log records come back as `RunnerMessage`s; batches of `--trace` go to the runner's stdout, which is
-`nsh`'s.
+`nsh`'s. On a real platform (`--target`) such an app's tests run in `nsh`'s process like any other's, and its apps in
+the development hosts built with its crates (`runtime::test_host`, `test_web`, `test_android`: a Rust app's too, whose
+runners have no dev server client). A Rust app's hosts know its root (the platforms' `set_root`, Android's `root!`, the
+web runtime's `rust_app!`); for its `nsh.json` the test session's server publishes no bundle but
+`DevServer::publish_root` (`ServerMessage::Root`, after the test's setup), and the host runs the root.
+
+`--trace` on a real platform is the host's: the test's setup says so (`DevServer::set_test_trace`,
+`ServerMessage::TestSetup`'s `trace`), the host's engine runs with `EngineConfig::trace` (`Model::set_up_engine`), so
+its commit and event timings come as its log lines, and the agent's `Model::apply` sends each batch's items, formatted
+as headless runs print them (`trace.rs`), as a `ClientMessage::Trace`, before the outcome of the step it came in. The
+test's side prints them under the step `Remote` took last (named as `Headless` names its steps).
+
+### On a real platform (`--target`)
+
+`nsh test --target <platform>` runs the apps tests open on the platform's development host (`macos`, `linux`,
+`windows`, `gpui`, `web`, `ios`, `android`). `App` drives either kind
+of app through one trait (`driver.rs` `Driver`): `Headless`, or `Remote`, which turns each step and query into a
+`nsh_dev::protocol::TestStep` for the host (`TestRun::host`, a `StartHost` the CLI makes: `nsh-cli/src/test_host.rs`).
+For each `open`, the CLI builds the entry, starts a dev server of its own in a test session
+(`DevServer::test_session`: its hello says `test`), publishes the build and starts the host with `--dev-server`,
+`--window-size` and a fresh `--data-dir`, removed after it. A host whose hello says `tests` takes steps:
+`DevServer::step` sends a `ServerMessage::Step` with an id to the test host that connected last and blocks for the
+`ClientMessage::StepDone` with that id; a host that leaves fails its waiting steps.
+
+The host's side is `nsh_testing::agent` (feature `agent`: no QuickJS, no network; the dev hosts link it). Its
+`Model` keeps the headless driver's `Screen`, fed every batch the surface applied and every error the app reported,
+so selectors resolve the same everywhere; the `Agent` takes each step on a thread of its own: it resolves the
+selector on the model, scrolls the view into view when it is not (the innermost scroll view around it that hides it,
+a gesture at a time), asks the platform where it is (`Native::bounds`) and acts there with synthesized input
+(`Native`: press, long press, scroll, typed keys, `back`, dialogs, screenshots, the window's size and appearance),
+then waits until neither a batch came nor a native animation ran for 100 ms (2 s at most; the web's page counts its own
+finite animations too: a screen sliding in). `Native`'s calls do their work
+on the platform's main thread and return when the input is posted. Screenshots come back as PNG bytes (base64): the
+test's side saves them, as the host may run on another machine. A manual clock does not exist on a real platform:
+`runFor` waits, `fastForward` and `setSystemTime` fail, and `open` refuses what a host cannot be given yet (clipboard,
+locale, reduced motion, safe area).
+
+Routes and storage reach the host through the dev server (`HostOptions`, `DevServer::set_test_storage` and
+`set_test_network`). Before the first bundle, the server sends the test host a `ServerMessage::TestSetup` with the
+seeded storage; the host's `Tester` hands it to `Model::set_up`, and `Model::set_up_engine` starts the engine on a
+`MemoryStorage` holding those entries and on `agent/forward.rs`'s `ForwardNetwork`. Each
+request the app makes goes back as a `ClientMessage::Fetch` with an id (`FetchCancel` when the app drops it); the
+test's side answers it from its routes (`protocol::TestNetwork`, `run.rs`'s `HostRoutes` over the same
+`StubNetwork` headless runs use, recording every request for `app.requests()`) with `ServerMessage::Fetch` replies:
+`Head`, `Data` (base64) and `End`, or `Failed`, or `Pass` for `network: "live"`, when the host's own network makes
+the request. `app.storage()` asks the host (`SceneQuery::Storage`). The web's page takes both through `dev.html`
+(`player.testSetup`, `testFetchReply`, and `onTestSend` for its requests).
+
+macOS (`nsh-platform-macos`, feature `dev`): `agent.rs` implements `Native` with `synth.rs`'s posted mouse, trackpad
+and key events, `NSView` frames converted to the content's top-left points, `NSAlert`
+buttons pressed by title (`system::answer_dialog`), and the content view cached into a PNG; `dev.rs`'s `Tester`
+attaches the model to the surface on the server's test session (before the first bundle) and starts the agent's
+thread. GPUI (`nsh-platform-gpui`, feature `dev`): `agent.rs` on GPUI's main thread, input through the handlers real
+input goes through (`synth.rs`), back the mouse's back button, dialogs pressed at their buttons' laid-out middles
+(`docs/dev/gpui.md`). Linux (`nsh-platform-linux`, feature `dev`): input through `input::simulate` and the focused
+GTK field's own signals (GTK 4 takes no made-up events), dialogs' `GtkButton`s clicked, screenshots rendered
+offscreen (`docs/dev/linux.md`). Windows (`nsh-platform-windows`, feature `dev`): input at the input module's entry
+points as on GPUI, screenshots captured with `PrintWindow` (`docs/dev/windows.md`). iOS (`nsh-platform-ios`,
+feature `dev`; `nsh-cli/src/test_ios.rs`): the CLI installs the host in a simulator (a booted one, else the newest
+iPhone) and launches it per `open` with `--dev-server` and a fresh `--data-dir` (the simulator shares the Mac's network
+and files). Touches are IOHID digitizer events handed to UIKit (`-[UIApplication _enqueueHIDEvent:]`, with IOKit's
+and BackBoardServices' functions looked up at run time, `synth.rs`), so UIKit makes the `UITouch`es and runs hit
+testing, gesture recognizers and scroll views as for a finger: a press is a finger down and up, a scroll a drag kept
+inside the scroll view that rests (still reporting where it is) before it lifts, so it ends without a fling; a tap
+that lands in a text input also gives it the focus (made touches leave the first responder where it was, as UI test
+tools know). Typing goes through the software keyboard's input manager (`UIKeyboardImpl.addInputString:`, a key at
+a quick typist's pace), which asks the input's delegate first (`maxLength`, a controlled value), as the keyboard does.
+Back taps the header's back button (the bar button carrying the back chevron's mask) or swipes a presented sheet
+down; dialogs are answered with a tap on the `UIAlertController`'s button; screenshots are
+`drawViewHierarchyInRect:` as a PNG; a step waits for finite Core Animation animations and gliding scroll views too.
+The system's appearance is the simulator's: the CLI switches it (`simctl ui appearance`) and restores it after the
+app; the screen keeps its device's size. Android (`nsh-platform-android`, feature `dev`; `TestAgent.java`;
+`nsh-cli/src/test_android.rs`): the CLI installs the host on the first device `adb devices` lists and starts it per
+`open` with the dev server's port forwarded (`adb reverse`) and a data directory of its own in the host's cache
+(`dataDir`, emptied as it starts). The agent's calls go to `TestAgent` (a class looked up in `JNI_OnLoad`), which does
+each on the UI thread: `MotionEvent`s dispatched to the window's views (or the dialog's) as a finger's, with drags
+that rest before they lift as on iOS; typing as a keyboard's `KeyEvent`s (`KeyCharacterMap`; what no key types is
+committed through the field's input connection), Ctrl+A first as a shortcut, as the window's input stage offers it;
+back is the activity's back press; dialogs are answered with a tap on the `AlertDialog`'s button (back to close it);
+screenshots draw the window and the dialog into a bitmap. A step waits for the native animation graph and for anything
+that moves: a signature of every shown view's place, offset, scroll position and opacity, compared between looks. The
+system's appearance is the device's night mode, which the CLI switches (`cmd uimode night`) and restores. All of them
+use `nsh_testing::agent::Tester`, which turns the dev client's
+test events into an agent's steps on a `Worker` thread.
+These hosts are also how a change to a platform is checked by hand: `nsh test <entry> --target <platform>` with steps
+on standard input (`app.screenshot("a.png")`, `app.press(…)`) opens the app in the platform's window, takes them and
+closes it.
+
+The web (`--target web`, `nsh-cli/src/test_web.rs`): the agent runs in the CLI, the app in a page of a headless
+Chromium browser (Chrome, Edge or Chromium; `--browser <PATH>`, else the one installed where `cdp.rs` looks; nsh never
+fetches one and fails saying so when there is none). One browser serves the run; each `open` gets a page in a browser
+context of its own (storage apart) on a dev server of its own that also serves the web host's page
+(`DevServer::serve_web`). The development runtime (`nsh-dev.wasm`, feature `dev` of `nsh-platform-web`) keeps the
+`Model` once the server's hello says `test`, and answers the steps' questions about it (`TestStep::Scene` with a
+`SceneQuery`: `nsh_testing::agent::answer`; where views are, the viewport, inputs' text and dialogs' buttons from the
+DOM, in `nsh.js`'s `testPage`). The CLI's agent sees the app through `RemoteScene`, which asks those questions
+through `DevServer::step`, and acts with the browser's trusted input over the DevTools protocol (`Input.dispatch*`:
+mouse presses, wheel events of 20 px a frame apart, key events with macOS's editing commands, as Playwright sends
+them), `history.back()` for back, `Emulation.*` for the viewport and the color scheme and `Page.captureScreenshot`.
 
 ## New apps (`nsh init --template`)
 
@@ -334,7 +441,7 @@ otherwise, so scripts and CI never wait for an answer.
   that exist are kept; only a directory that has them all is refused.
 - **`rust`**: an independent Cargo workspace: `Cargo.toml`, `src/main.rs` (a native desktop entry using
   `AppSource::Rust(Root::of::<App>())`; the platform dependencies are target-specific and disable default features,
-  so `cargo run` mounts the Rust root directly and accepts `NSH_SCRIPT` for window checks), `src/lib.rs` (the root
+  so `cargo run` mounts the Rust root directly), `src/lib.rs` (the root
   component and its `#[native_module("<slug>/native")]` registry, which exports `App` for a TSX entry added later),
   `nsh.json` with `"rust": "."` and `"root": "App"`, `.gitignore` and a README (`templates/rust/`) saying how to add
   that entry. No TSX, so no `tsconfig.json` and no `.nsh/types`. `examples/gallery-rs` is a Rust app with a native
@@ -410,17 +517,18 @@ program that describes them, builds the hosts and runners with them, and does ev
     program, with no console), `android` (the app's `libnsh.so`: `nsh::ui_sets!`, which the Android runtime looks up
     when an engine starts) and `web` (the app's web runtime, a `cdylib` for `wasm32-unknown-unknown` built with the
     `web` profile: `nsh_platform_web::ui_sets!`, whose `nsh_app_init` export `nsh.js` calls; `docs/dev/web.md`, "Apps
-    with Rust components"). `gpui-host` / `gpui-app` (`nsh_platform_gpui::set_ui_sets`, under `cfg(any(target_os =
-    "linux", target_os = "macos", windows))`; `gpui-app` is a windowed program on Windows too) are a workspace of their
-    own in `.nsh/rust/gpui` (excluded from the main one), written only when a GPUI host or runner is built
-    (`RustApp::gpui_workspace`), so builds for the other targets never resolve GPUI's crates.
+    with Rust components"). `gpui-host` (`nsh_platform_gpui::set_ui_sets`, under `cfg(any(target_os = "linux",
+    target_os = "macos", windows))`) is a workspace of its own in `.nsh/rust/gpui` (excluded from the main one), written
+    only when the GPUI host is built (`RustApp::gpui_workspace`), so builds for the other targets never resolve GPUI's crates.
 
   They take nsh's crates where the app's crates do (`rust_app::Nsh::of`, from each crate's dependencies through `cargo
-  metadata --no-deps`): from crates.io at the version of the running `nsh` (`=0.1.1` for nsh 0.1.1: the code it
+  metadata`): from crates.io at the version of the running `nsh` (`=0.1.1` for nsh 0.1.1: the code it
   generates calls their API, and the description and the trace protocol must be the ones it reads), which the app's
   requirements must accept, or by path from the checkout the app's crates depend on (nsh's own examples, as
   `examples/gallery-rs`, through the workspace's path dependencies), which must be of that version, with the app's
-  crates.io dependencies on nsh patched to it (all of nsh's crates but the bundler, which nothing there builds).
+  crates.io dependencies on nsh patched to it. Git dependencies use the checkout Cargo resolves from the app’s
+  lockfile, including registry dependencies redirected by its patches. The generated workspaces patch both crates.io
+  and the Git repository to that checkout, so the app and its hosts share the same core and native module types.
   Requirements of another version, or crates taking nsh from two places, stop the command with what to change, rather
   than a build failing later on two `nsh-core`s. They build in the app's own `target/`, as a Cargo project in the app's
   directory does (`nsh init` ignores it), or in `CARGO_TARGET_DIR` when it is set (one directory several checkouts or
@@ -428,7 +536,11 @@ program that describes them, builds the hosts and runners with them, and does ev
   is published by `release-crate.yml`, the hosts and runners included; the binaries are named after the app
   (`nsh-app-<package>-describe`; with several crates all their packages, `nsh-app-charts-storage-test`), and so are
   the libraries (the web runtime's, the Android `cdylib`s: `libnsh_app_charts_android.so`, installed as `libnsh.so`),
-  so apps sharing a target directory never take each other's.
+  so apps sharing a target directory never take each other's. Generated workspaces optimize `quickjs-jit-sys`,
+  `taffy`, `objc2` and `objc2-encode` at level 3 in debug builds, matching NSH's own workspace, so hot reload hosts
+  keep interpreter, layout and Objective-C bridge performance while application Rust code retains debug settings.
+  Objective-C signature checks stay enabled: their encoding parser needs optimization too, since every native
+  message checks its signature in debug builds.
 - Before a command on the app (`build`, `test`, `dev`, `run`, `package`, `publish`, `check`) `nsh` builds `describe`
   ("building the Rust crate …": Cargo decides whether the app's Rust code changed) and runs it when the program is
   new, keeping its output in `.nsh/rust/description.json` with the program's size and time (`RustApp::describe`). The
@@ -440,7 +552,7 @@ program that describes them, builds the hosts and runners with them, and does ev
   `native-pipeline.md`), `.nsh/types` declares each set (`.nsh/types/<specifier>.d.ts` from its declarations, found
   through tsconfig's `"*"` path, which falls back to `node_modules`), the dev server serves their files and tells hosts
   which sets a bundle needs. The hosts `run` and `package` need are built for the app instead of taken from the runtime
-  (iOS `--target` triples; Linux's, macOS's, Windows' and GPUI's `*-host` / `*-app` for this machine; Android: the
+  (iOS `--target` triples; Linux's, macOS's, Windows' `*-host` / `*-app` and GPUI's `gpui-host` for this machine; Android: the
   prebuilt `classes.dex` with the app's `libnsh.so` for each ABI of the prebuilt runtime, cross-compiled with the NDK;
   the web: the app's `nsh.wasm` / `nsh-dev.wasm`, with nsh's `nsh.js`).
 - `nsh test` builds the app's headless runner (`RustApp::test_runner`) and runs the test files in it, building the
@@ -458,7 +570,7 @@ program that describes them, builds the hosts and runners with them, and does ev
   `rust-macos`, `rust-windows`, `rust-ios` (each the platform's release runner library without its feature `js`, whose
   `run_rust` mounts the generated `app_root()`), `rust-android` (`nsh::ui_sets!` and `nsh::main!`,
   `nsh-platform-android` without `js`; the APK's manifest gets the `com.longbridge.nsh.RUST` meta-data `AppActivity`
-  reads), `rust-web` (`docs/dev/web.md`) and `gpui/rust-gpui`, and the root to `test` (`app_root()`: `open(".")` of a test
+  reads) and `rust-web` (`docs/dev/web.md`), and the root to `test` (`app_root()`: `open(".")` of a test
   starts it). None of them, nor `describe`, links nsh-js, QuickJS, rolldown or the bundler: a Rust app compiles none of
   them to build, run or package it; `nsh test` runs TypeScript tests, so its runner links QuickJS (not the bundler). `RustApp::runtime`, `android` and `web` build those
   instead; `nsh package` ships no bundle (`build::rust_root`: the crates' assets only); `nsh run` runs the desktops'
@@ -501,14 +613,14 @@ The CLI finds prebuilt runtimes next to itself (`bin/../runtime`, the distributi
 Windows' `nsh-windows-host.exe` / `nsh-windows-app.exe`; the distribution has GPUI's in `runtime/gpui/` on each OS) and `target/android/<profile>[-dev]` with the CLI's own profile (`NSH_RUNTIME` overrides). In a checkout (`<root>/target/<profile>/nsh` next to
 `crates/nsh-ios-host`), the CLI builds what it needs with cargo first (`cargo build -p nsh-ios-host --target ...`,
 `cargo xtask android --dev`), so `nsh run` never uses a missing or stale host; on a Mac without Xcode's Metal
-Toolchain it builds GPUI's hosts and runners with `nsh-platform-gpui/runtime-shaders` (`gpui.md`). The web runtimes (`runtime/web/nsh.wasm`
+Toolchain it builds GPUI's hosts with `nsh-platform-gpui/runtime-shaders` (`gpui.md`). The web runtimes (`runtime/web/nsh.wasm`
 for published apps, `nsh-dev.wasm` for the development host, and `nsh.js`: `docs/dev/web.md`) are always built with
 the `web` profile, into `target/wasm32-unknown-unknown/web/`. Every CLI wasm build, including an app's generated Rust runtime outside the checkout, selects `getrandom_backend="custom"` for the browser entropy bridge. `runtime::web_build_flags` appends it to explicit Rust flags or merges a Cargo target-config array, preserving the existing stack and user flags; generated web packages also retain their 8 MiB stack link argument.
 
 ## Releases
 
 `.github/workflows/release.yml` runs `cargo xtask dist` on macOS (Apple silicon: the iOS, Mac Catalyst and macOS
-runtimes and the iOS SDK), Linux and Windows (x86_64), each with the GPUI runtime of its OS and the Android runtime, checks that the packaged CLI
+runtimes and the iOS SDK), Linux and Windows (x86_64), each with the GPUI development host of its OS and the Android runtime, checks that the packaged CLI
 makes and bundles a new app, and archives `dist/nsh` as one directory `nsh/` in `nsh-<platform>.tar.gz` (`.zip` on
 Windows), plus the embedding SDKs alone (`nsh-embed-ios.zip`, `nsh-embed-android.zip`), each with a `.sha256`. Asset
 names carry no version, so `releases/latest/download/<asset>` always resolves; the installers and package managers
@@ -526,6 +638,9 @@ both workspaces' `[workspace.dependencies]` (the run fails otherwise). Crates al
 skipped, so a run stopped by crates.io's rate limit on new crates can simply be run again; running it by hand with
 *dry run* packages and verifies without uploading.
 
+The CLI build script stamps `-V` / `--version` with seven characters of Git HEAD
+(or Cargo's packaged VCS metadata); crate dependency versions stay unchanged.
+
 How users get it (`website/docs/installation.md`):
 
 - `website/public/install.sh` and `install.ps1` (served at `nsh.dev/install.sh`, `/install.ps1`, and
@@ -533,6 +648,9 @@ How users get it (`website/docs/installation.md`):
   `~/.nsh` (`%LOCALAPPDATA%\nsh` on Windows) with it; `~/.local/bin/nsh` links to it, Windows adds `bin` to the
   user's `PATH`. The CLI resolves its own symlink (`runtime::cli_exe`) to find `bin/../runtime`: macOS reports
   `current_exe` as it was run.
+- `install.sh --source` clones the latest `main` into `~/.nsh/source`, builds the release CLI with
+  Cargo's existing configuration and links to that executable. Re-running fetches `main`; dirty checkouts
+  are preserved and rejected. The checkout stays available for on-demand native runtime builds.
 - Homebrew: publishing a stable release runs `.github/workflows/packages.yml`, which fills in
   `.github/packages/nsh.rb` with the archives' checksums and pushes it to `longbridge/homebrew-tap` as
   `Formula/nsh.rb`. It validates the tag and checksum sidecars, downloads and verifies both archives, then installs

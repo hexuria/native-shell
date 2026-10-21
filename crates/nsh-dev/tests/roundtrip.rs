@@ -16,13 +16,18 @@ fn host(device: &str, bytecode: &str) -> HostInfo {
         platform: HostPlatform::Android,
         bytecode_version: bytecode.into(),
         ui_sets: vec!["app/native".into(), "app/charts".into()],
+        tests: false,
     }
 }
 
 fn next_non_status(rx: &mpsc::Receiver<DevEvent>) -> DevEvent {
     loop {
         match rx.recv_timeout(TIMEOUT).expect("event") {
-            DevEvent::Connected | DevEvent::Disconnected | DevEvent::Building => continue,
+            DevEvent::Connected
+            | DevEvent::Disconnected
+            | DevEvent::Building
+            | DevEvent::Testing
+            | DevEvent::Step { .. } => continue,
             event => return event,
         }
     }
@@ -312,4 +317,146 @@ fn a_host_without_the_apps_ui_set_is_told_it_cannot_run_it() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn a_test_session_asks_its_host_for_steps_and_hears_their_outcomes() {
+    use nsh_dev::protocol::{StepOutcome, TestStep};
+
+    let server = DevServer::start("127.0.0.1:0".parse().unwrap(), "bc-1", None, |_| {}).unwrap();
+    server.test_session();
+    assert_eq!(
+        server.step(TestStep::Texts, TIMEOUT),
+        Err("no host that takes test steps is connected".into())
+    );
+    let url = format!("ws://{}{WS_PATH}", server.local_addr());
+    let (tx, rx) = mpsc::channel();
+    let client = std::sync::Arc::new(std::sync::OnceLock::<DevClient>::new());
+    let answering = client.clone();
+    let started = DevClient::start(
+        url,
+        HostInfo {
+            tests: true,
+            ..host("tester", "bc-1")
+        },
+        move |event| match event {
+            DevEvent::Step { id, step } => {
+                let outcome = match step {
+                    TestStep::Texts => StepOutcome::Done {
+                        value: serde_json::json!(["Hello"]),
+                    },
+                    other => StepOutcome::Failed {
+                        message: format!("cannot {other:?}"),
+                    },
+                };
+                answering.get().expect("client").step_done(id, outcome);
+            }
+            event => {
+                let _ = tx.send(event);
+            }
+        },
+    )
+    .unwrap();
+    let _ = client.set(started);
+    // Told of the test session before anything else of the server's.
+    loop {
+        match rx.recv_timeout(TIMEOUT).expect("event") {
+            DevEvent::Testing => break,
+            DevEvent::Connected => continue,
+            other => panic!("{other:?} before the test session"),
+        }
+    }
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    while !server.has_tester() {
+        assert!(std::time::Instant::now() < deadline, "the host never came");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        server.step(TestStep::Texts, TIMEOUT),
+        Ok(serde_json::json!(["Hello"]))
+    );
+    assert_eq!(
+        server.step(TestStep::Back, TIMEOUT),
+        Err("cannot Back".into())
+    );
+}
+
+#[test]
+fn an_app_of_rust_only_runs_as_its_hosts_root() {
+    let server = DevServer::start("127.0.0.1:0".parse().unwrap(), "bc-1", None, |_| {}).unwrap();
+    server.publish_root();
+    let url = format!("ws://{}{WS_PATH}", server.local_addr());
+    let (tx, rx) = mpsc::channel();
+    let _client = DevClient::start(url, host("test-device", "bc-1"), move |e| {
+        let _ = tx.send(e);
+    })
+    .unwrap();
+    // A host connecting later hears it too: it is the latest state.
+    assert!(matches!(next_non_status(&rx), DevEvent::Root));
+}
+
+#[test]
+fn a_traced_test_session_hears_the_batches_before_the_step_ends() {
+    use nsh_dev::protocol::{StepOutcome, TestStep};
+
+    let (traces_tx, traces) = mpsc::channel();
+    let server = DevServer::start("127.0.0.1:0".parse().unwrap(), "bc-1", None, move |event| {
+        if let ClientEvent::Trace { items } = event {
+            let _ = traces_tx.send(items);
+        }
+    })
+    .unwrap();
+    server.test_session();
+    server.set_test_trace(true);
+    let url = format!("ws://{}{WS_PATH}", server.local_addr());
+    let (setup_tx, setup) = mpsc::channel();
+    let client = std::sync::Arc::new(std::sync::OnceLock::<DevClient>::new());
+    let answering = client.clone();
+    let started = DevClient::start(
+        url,
+        HostInfo {
+            tests: true,
+            ..host("tester", "bc-1")
+        },
+        move |event| match event {
+            DevEvent::TestSetup { trace, .. } => {
+                let _ = setup_tx.send(trace);
+            }
+            // A step's batch goes before its outcome.
+            DevEvent::Step { id, .. } => {
+                let client = answering.get().expect("client");
+                client.trace(vec!["Create { id: 2, kind: View }".into()]);
+                client.step_done(
+                    id,
+                    StepOutcome::Done {
+                        value: serde_json::Value::Null,
+                    },
+                );
+            }
+            _ => {}
+        },
+    )
+    .unwrap();
+    let _ = client.set(started);
+    assert!(
+        setup.recv_timeout(TIMEOUT).expect("the setup"),
+        "told to trace"
+    );
+    let deadline = std::time::Instant::now() + TIMEOUT;
+    while !server.has_tester() {
+        assert!(std::time::Instant::now() < deadline, "the host never came");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    server
+        .step(
+            TestStep::Press {
+                selector: "Add".into(),
+            },
+            TIMEOUT,
+        )
+        .unwrap();
+    assert_eq!(
+        traces.try_recv().expect("the batch, before the step's end"),
+        ["Create { id: 2, kind: View }"]
+    );
 }

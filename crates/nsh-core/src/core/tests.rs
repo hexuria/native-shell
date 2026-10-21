@@ -1,10 +1,9 @@
 use std::cell::Cell;
 
-use nsh_animation::{AnimationOp, AnimationProp};
-
 use super::*;
 use crate::{
     Color, EventKind, StyleValue,
+    animation::{AnimationOp, AnimationProp},
     geometry::{point, px},
 };
 
@@ -85,6 +84,25 @@ fn js_events<M: TextEngine>(c: &mut Core<M>) -> Vec<(NodeId, EventKind, EventPay
             JsEvent::Children { host, wanted } => {
                 native(host, "$children", crate::JsonValue::Bool(wanted))
             }
+            JsEvent::Render {
+                host,
+                prop,
+                key,
+                value,
+            } => native(
+                host,
+                "$render",
+                serde_json::json!({
+                    "prop": prop,
+                    "key": key.as_str(),
+                    "value": json_host::render_value(&*value),
+                }),
+            ),
+            JsEvent::Unrender { host, prop, key } => native(
+                host,
+                "$unrender",
+                serde_json::json!({ "prop": prop, "key": key.as_str() }),
+            ),
             JsEvent::Reply { call, result } => native(
                 ROOT_ID,
                 "$return",
@@ -221,7 +239,39 @@ fn values_of_calls_into_rust_that_panic_as_they_drop_stay_in_the_core() {
 }
 
 fn core() -> Core<FakeEngine> {
-    Core::new(FakeEngine::default(), size_pt(320.0, 480.0))
+    let mut c = Core::new(FakeEngine::default(), size_pt(320.0, 480.0));
+    c.set_tokens(crate::ui::tokens::sample());
+    c
+}
+
+/// The tokens of a theme file of the tests' own format, `{ "key":
+/// "#rrggbb", … }` over the sample's (`None`: the sample's): the core reads
+/// `uiTheme` with what a UI set brings.
+fn test_tokens(json: Option<&str>) -> Result<crate::ui::Tokens, String> {
+    let mut tokens = crate::ui::tokens::sample();
+    let Some(json) = json else {
+        return Ok(tokens);
+    };
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    for (key, value) in value.as_object().ok_or("not an object")? {
+        let color = value.as_str().and_then(Color::parse).ok_or("not a color")?;
+        tokens.set_color(key, color.into());
+    }
+    Ok(tokens)
+}
+
+/// Tokens with just `colors`.
+fn tokens_with(colors: &[(&str, crate::ui::AdaptiveColor)]) -> crate::ui::Tokens {
+    let mut tokens = crate::ui::Tokens::default();
+    for (key, color) in colors {
+        tokens.set_color(key, *color);
+    }
+    tokens
+}
+
+/// Color token `key` of the tokens apps have.
+fn token(key: &str) -> crate::ui::AdaptiveColor {
+    crate::ui::tokens::sample().color(key).unwrap()
 }
 
 fn style(props: &[(&str, StyleValue<'_>)]) -> Box<Style> {
@@ -3257,6 +3307,45 @@ fn disabled_views_take_no_presses() {
     assert_eq!(view_style_of(&batch, 2).unwrap().opacity, 1.0);
 }
 
+/// A view that takes no presses unmounts its other listeners when it is
+/// disabled too: a secondary click goes on to the listener around it.
+#[test]
+fn disabled_views_hear_no_context_menus_or_file_drops() {
+    let mut c = core();
+    view_with_classes(&mut c, 2, "disabled:opacity-40");
+    let disabled = |d| Op::SetProp {
+        id: 2,
+        prop: Prop::Native(NativeProp::Disabled(d)),
+    };
+    let events_of = |batch: &MountBatch| {
+        batch.items.iter().rev().find_map(|i| match i {
+            MountItem::Events { id: 2, events } => Some(*events),
+            _ => None,
+        })
+    };
+    apply(
+        &mut c,
+        [EventKind::ContextMenu, EventKind::FileDrop]
+            .into_iter()
+            .map(|event| Op::Listen {
+                id: 2,
+                event,
+                enabled: true,
+            })
+            .collect(),
+    );
+    let batch = c.commit().unwrap();
+    let events = events_of(&batch).unwrap();
+    assert!(events.contains(EventKind::ContextMenu) && events.contains(EventKind::FileDrop));
+    apply(&mut c, vec![disabled(true)]);
+    let batch = c.commit().unwrap();
+    assert!(events_of(&batch).unwrap().is_empty());
+    apply(&mut c, vec![disabled(false)]);
+    let batch = c.commit().unwrap();
+    let events = events_of(&batch).unwrap();
+    assert!(events.contains(EventKind::ContextMenu) && events.contains(EventKind::FileDrop));
+}
+
 /// A style patch of `decls` (`activeStyle={{ … }}`).
 fn patch(decls: &[(&str, crate::StyleValue<'_>)]) -> Option<Arc<crate::StylePatch>> {
     let mut style = crate::Style::default();
@@ -4698,7 +4787,7 @@ mod components {
                     .footer
                     .place(move |f| f.on_press(move |_: &()| shown.update(|s| *s = !*s))),
             )
-            .child(If::new(shown, || view().h(px(10.0))))
+            .child(when(shown, || view().h(px(10.0))))
     }
 
     /// What a view gives a slot's node (its handlers) stays while the node
@@ -4836,17 +4925,10 @@ mod components {
         let inner_taps = signal(0);
         view()
             .child(text(move || format!("outer {}", inner_taps.get())))
-            .child(
-                Tally::element(TallyProps {
-                    label: "In".into(),
-                    ..TallyProps::initial()
-                })
-                .on_event(move |event: &TallyEvent| {
-                    let TallyEvent::Tap { .. } = event;
-                    inner_taps.update(|t| *t += 1);
-                    cx.emit(OuterEvent::InnerTap(inner_taps.get_untracked()));
-                }),
-            )
+            .child(tally().label("In").on_tap(move |_: &TallyEvent| {
+                inner_taps.update(|t| *t += 1);
+                cx.emit(OuterEvent::InnerTap(inner_taps.get_untracked()));
+            }))
     }
 
     #[test]
@@ -4972,7 +5054,7 @@ mod components {
     fn Swatch(_props: SwatchProps) -> impl IntoElement {
         view()
             .size_10()
-            .bg(move || theme().primary)
+            .bg(move || tokens().color("primary.background").unwrap())
             .active(|s| s.bg(rgb(0xff0000)))
     }
 
@@ -4980,7 +5062,7 @@ mod components {
     fn theme_colors_and_press_styles_switch_natively() {
         let mut c = core();
         let mut registry = Registry::new();
-        registry.register::<Swatch>();
+        registry.register::<Swatch>().tokens_from(test_tokens);
         c.set_components(registry);
         apply(
             &mut c,
@@ -5006,9 +5088,9 @@ mod components {
                 _ => None,
             })
         };
-        let theme = crate::ui::Theme::default();
+        let primary = token("primary.background");
         let batch = c.commit().unwrap();
-        assert_eq!(background(&batch), Some(Color::from(theme.primary.light)));
+        assert_eq!(background(&batch), Some(Color::from(primary.light)));
         assert_eq!(frame_of(&batch, 2).map(|f| f.size.width.0), Some(40.0));
         // The platform reports presses on it (`active`).
         assert!(batch.items.iter().any(|i| matches!(
@@ -5021,17 +5103,98 @@ mod components {
             ..Default::default()
         });
         let batch = c.commit().unwrap();
-        assert_eq!(background(&batch), Some(Color::from(theme.primary.dark)));
+        assert_eq!(background(&batch), Some(Color::from(primary.dark)));
         c.set_states(2, crate::tailwind::state::PRESSED);
         let batch = c.commit().unwrap();
         assert_eq!(background(&batch), Some(Color(0xff0000ff)));
+    }
+
+    /// A selected state whose style is the app's (as `nsh_base::Button`'s).
+    #[derive(Clone, PartialEq, Props)]
+    struct PillProps {
+        #[prop(default)]
+        selected: crate::ui::Prop<bool>,
+        #[prop(default)]
+        selected_style: crate::ui::Prop<crate::ui::Style>,
+    }
+
+    #[component]
+    fn Pill(props: PillProps) -> impl IntoElement {
+        view()
+            .size_10()
+            .accessibility_state(move || crate::AccessibilityState {
+                selected: props.selected.get(),
+                ..crate::AccessibilityState::default()
+            })
+            .selected_style(props.selected_style)
+    }
+
+    /// A selected pill styled with a theme color and an opacity a press
+    /// changes, through its style prop's closure.
+    #[component]
+    fn Pills() -> impl IntoElement {
+        let dim = signal(false);
+        view()
+            .on_press(move || dim.set(true))
+            .child(pill().selected(true).selected_style(move |s| {
+                s.bg(move || tokens().color("primary.background").unwrap())
+                    .opacity(move || if dim.get() { 0.5_f32 } else { 1.0 })
+            }))
+    }
+
+    #[test]
+    fn a_style_prop_set_with_a_closure_follows_the_theme_and_its_signals() {
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Pills>().tokens_from(test_tokens);
+        c.set_components(registry);
+        apply(
+            &mut c,
+            vec![
+                Op::Create {
+                    id: 2,
+                    tag: Tag::View,
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::Component(std::any::type_name::<Pills>().into()),
+                },
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+            ],
+        );
+        let styled = |batch: &MountBatch| {
+            batch.items.iter().find_map(|i| match i {
+                MountItem::ViewStyle { id, style } if *id != 2 => {
+                    Some((style.background_color, style.opacity))
+                }
+                _ => None,
+            })
+        };
+        let primary = token("primary.background");
+        let batch = c.commit().unwrap();
+        assert_eq!(styled(&batch), Some((Color::from(primary.light), 1.0)));
+        // Dark appearance: the theme color switches natively.
+        c.set_class_environment(crate::tailwind::ClassEnvironment {
+            dark: true,
+            ..Default::default()
+        });
+        let batch = c.commit().unwrap();
+        assert_eq!(styled(&batch), Some((Color::from(primary.dark), 1.0)));
+        // What the closure's bindings read changes it.
+        assert!(c.component_event(2, EventKind::Press, &EventPayload::None));
+        let batch = c.commit().unwrap();
+        assert_eq!(styled(&batch), Some((Color::from(primary.dark), 0.5)));
     }
 
     #[test]
     fn the_host_theme_wins_over_the_apps_until_cleared() {
         let mut c = core();
         let mut registry = Registry::new();
-        registry.register::<Swatch>();
+        registry.register::<Swatch>().tokens_from(test_tokens);
         c.set_components(registry);
         apply(
             &mut c,
@@ -5057,14 +5220,12 @@ mod components {
                 _ => None,
             })
         };
-        let themed = |hex: &str| {
-            crate::ui::Theme::from_json(&format!(
-                r#"{{ "themes": [{{ "colors": {{ "primary.background": "{hex}" }} }}] }}"#
-            ))
-            .unwrap()
+        let themed = |hex: u32| {
+            tokens_with(&[("primary.background", rgb(hex).into())])
+                .over(&test_tokens(None).unwrap())
         };
         c.commit().unwrap();
-        c.set_host_theme(Some(themed("#00ff00")));
+        c.set_host_tokens(Some(themed(0x00ff00)));
         assert_eq!(
             c.commit().as_ref().and_then(background),
             Some(Color::from(rgb(0x00ff00)))
@@ -5074,19 +5235,17 @@ mod components {
             &mut c,
             vec![Op::SetProp {
                 id: ROOT_ID,
-                prop: Prop::UiTheme(
-                    r##"{ "themes": [{ "colors": { "primary.background": "#0000ff" } }] }"##.into(),
-                ),
+                prop: Prop::UiTheme(r##"{ "primary.background": "#0000ff" }"##.into()),
             }],
         );
         assert_eq!(c.commit().as_ref().and_then(background), None);
-        c.set_host_theme(None);
+        c.set_host_tokens(None);
         assert_eq!(
             c.commit().as_ref().and_then(background),
             Some(Color::from(rgb(0x0000ff)))
         );
         // Setting the same theme again renders nothing.
-        c.set_theme(themed("#0000ff"));
+        c.set_tokens(themed(0x0000ff));
         assert_eq!(c.commit().as_ref().and_then(background), None);
     }
 
@@ -5096,22 +5255,18 @@ mod components {
         view_with_classes(&mut c, 2, "w-10 h-10 bg-primary");
         view_with_classes(&mut c, 4, "w-10 h-10 bg-chart-up");
         view_with_classes(&mut c, 6, "w-10 h-10 bg-red-500");
-        let default = crate::ui::Theme::default();
         let batch = c.commit().unwrap();
         assert_eq!(
             view_style_of(&batch, 2).unwrap().background_color,
-            Color::from(default.primary.light)
+            Color::from(token("primary.background").light)
         );
         // Not a token of the app's theme.
         assert!(view_style_of(&batch, 4).is_none());
-        let host = crate::ui::Theme::from_json(
-            r##"{ "themes": [
-                { "mode": "light", "colors": { "primary.background": "#00ff00", "chart.up": "#0000ff" } },
-                { "mode": "dark", "colors": { "primary.background": "#004400" } }
-            ] }"##,
-        )
-        .unwrap();
-        c.set_host_theme(Some(host.clone()));
+        let host = tokens_with(&[
+            ("primary.background", AdaptiveColor::rgb(0x00ff00, 0x004400)),
+            ("chart.up", rgb(0x0000ff).into()),
+        ]);
+        c.set_host_tokens(Some(host.clone()));
         let batch = c.commit().unwrap();
         assert_eq!(
             view_style_of(&batch, 2).unwrap().background_color,
@@ -5134,7 +5289,7 @@ mod components {
         // New values of the same tokens: only their classes are resolved.
         let mut changed = host;
         changed.set_color("primary.background", rgb(0xff00ff).into());
-        c.set_host_theme(Some(changed));
+        c.set_host_tokens(Some(changed));
         let batch = c.commit().unwrap();
         assert_eq!(
             view_style_of(&batch, 2).unwrap().background_color,
@@ -5148,7 +5303,7 @@ mod components {
     fn the_apps_token_classes_on_a_component_follow_the_theme() {
         let mut c = core();
         let mut registry = Registry::new();
-        registry.register::<Swatch>();
+        registry.register::<Swatch>().tokens_from(test_tokens);
         c.set_components(registry);
         apply(
             &mut c,
@@ -5173,11 +5328,7 @@ mod components {
             ],
         );
         c.commit().unwrap();
-        let host = crate::ui::Theme::from_json(
-            r##"{ "themes": [{ "colors": { "chart.up": "#0000ff" } }] }"##,
-        )
-        .unwrap();
-        c.set_host_theme(Some(host));
+        c.set_host_tokens(Some(tokens_with(&[("chart.up", rgb(0x0000ff).into())])));
         let batch = c.commit().unwrap();
         // The app's class wins over the component's own background.
         assert_eq!(
@@ -5189,17 +5340,18 @@ mod components {
     #[test]
     fn a_host_theme_keeps_the_apps_own_tokens() {
         let mut c = core();
+        let mut registry = Registry::new();
+        registry.tokens_from(test_tokens);
+        c.set_components(registry);
         apply(
             &mut c,
             vec![Op::SetProp {
                 id: ROOT_ID,
-                prop: Prop::UiTheme(
-                    r##"{ "themes": [{ "colors": { "chart.up": "#0000ff" } }] }"##.into(),
-                ),
+                prop: Prop::UiTheme(r##"{ "chart.up": "#0000ff" }"##.into()),
             }],
         );
         view_with_classes(&mut c, 2, "w-10 h-10 bg-chart-up");
-        c.set_host_theme(Some(crate::ui::Theme::default()));
+        c.set_host_tokens(Some(crate::ui::tokens::sample()));
         let batch = c.commit().unwrap();
         assert_eq!(
             view_style_of(&batch, 2).unwrap().background_color,
@@ -5624,8 +5776,10 @@ mod components {
                 let len = name.with(String::len) as f32;
                 Painter::new().fill_rect(0.0, 0.0, len, 4.0)
             }))
-            .child(If::new(
+            .child(when(
                 move || name.with(String::len) > 2,
+                // `nsh_base::dialog` is this, and nsh-base depends on the core.
+                #[allow(deprecated)]
                 move || {
                     modal()
                         .close_on_swipe(false)
@@ -5967,12 +6121,12 @@ mod components {
             .collect();
         // The value and its interpolation, in the core's id range.
         let value = match animations[0] {
-            nsh_animation::AnimationOp::CreateValue { node, value: 0.0 } => node,
+            crate::animation::AnimationOp::CreateValue { node, value: 0.0 } => node,
             ref op => panic!("{op:?}"),
         };
         assert_eq!(value % 2, 1, "the core's ids are odd");
         assert!(
-            matches!(animations[1], nsh_animation::AnimationOp::CreateInterpolate { input, .. } if input == value)
+            matches!(animations[1], crate::animation::AnimationOp::CreateInterpolate { input, .. } if input == value)
         );
         assert_eq!(texts(&batch), ["resting"]);
 
@@ -5990,17 +6144,19 @@ mod components {
             .items
             .iter()
             .find_map(|i| match i {
-                MountItem::Animation(nsh_animation::AnimationOp::Start {
-                    node, animation, ..
+                MountItem::Animation(crate::animation::AnimationOp::Start {
+                    node,
+                    animation,
+                    ..
                 }) if *node == value => Some(*animation),
                 _ => None,
             })
             .expect("a spring");
         assert_eq!(texts(&batch), ["springing"]);
         let mut finished = vec![
-            nsh_animation::Finished::new(animation, true),
+            crate::animation::Finished::new(animation, true),
             // JS's (even ids) stay for JS.
-            nsh_animation::Finished::new(8, true),
+            crate::animation::Finished::new(8, true),
         ];
         c.animations_finished(&mut finished);
         assert_eq!(finished.len(), 1);
@@ -6029,7 +6185,7 @@ mod components {
             .filter(|i| {
                 matches!(
                     i,
-                    MountItem::Animation(nsh_animation::AnimationOp::Release { .. })
+                    MountItem::Animation(crate::animation::AnimationOp::Release { .. })
                 )
             })
             .count();
@@ -6089,7 +6245,7 @@ mod components {
                 },
             ],
         );
-        let animations = |batch: &MountBatch| -> Vec<nsh_animation::AnimationOp> {
+        let animations = |batch: &MountBatch| -> Vec<crate::animation::AnimationOp> {
             batch
                 .items
                 .iter()
@@ -6113,8 +6269,8 @@ mod components {
         let ops = animations(&batch);
         let fade = match ops[..] {
             [
-                nsh_animation::AnimationOp::CreateValue { node, value: 1.0 },
-                nsh_animation::AnimationOp::Start { node: started, .. },
+                crate::animation::AnimationOp::CreateValue { node, value: 1.0 },
+                crate::animation::AnimationOp::Start { node: started, .. },
             ] if started == node => node,
             _ => panic!("{ops:?}"),
         };
@@ -6146,7 +6302,7 @@ mod components {
         let batch = c.commit().unwrap();
         assert_eq!(
             animations(&batch),
-            [nsh_animation::AnimationOp::Set {
+            [crate::animation::AnimationOp::Set {
                 node: fade,
                 value: 0.5
             }]
@@ -6184,7 +6340,7 @@ mod components {
             .collect();
         assert_eq!(
             released,
-            [nsh_animation::AnimationOp::Release { node: fade }]
+            [crate::animation::AnimationOp::Release { node: fade }]
         );
     }
 
@@ -6299,7 +6455,7 @@ mod components {
     #[component]
     fn SelfClosing() -> impl IntoElement {
         let open = signal(true);
-        view().child(If::new(open, move || {
+        view().child(when(open, move || {
             view().on_press(move |_: &()| {
                 Owner::current().dispose();
                 let _ = (signal(5), animated_value(1.0), element_ref());
@@ -6514,9 +6670,7 @@ mod components {
 
     #[component]
     fn Drawer(props: DrawerProps) -> impl IntoElement {
-        view().child(If::new(props.open, move || {
-            view().p_2().child(props.children)
-        }))
+        view().child(when(props.open, move || view().p_2().child(props.children)))
     }
 
     /// Content with state of its own: the how-manieth it was made.
@@ -6539,13 +6693,7 @@ mod components {
                     .h(px(10.0))
                     .on_press(move |_: &()| open.update(|o| *o = !*o)),
             )
-            .child(
-                Drawer::element(DrawerProps {
-                    open: open.into(),
-                    children: Children::default(),
-                })
-                .child(Opened::element(())),
-            )
+            .child(drawer().open(open).child(opened()))
     }
 
     #[test]
@@ -6867,7 +7015,7 @@ mod components {
                 }))
                 .child(", ")
                 .child(text("bold").font_weight(FontWeight::BOLD))
-                .child(If::new(long, || " and more"))
+                .child(when(long, || " and more"))
                 .child(view().size(px(10.0)).bg(rgb(0xff0000))),
         )
     }
@@ -6993,7 +7141,7 @@ mod touch {
 
     /// The pad mounted: the core, the outer node and the inner one (both
     /// listen to touches).
-    fn pad(keep: bool) -> (Core<FakeEngine>, NodeId, NodeId) {
+    fn mount_pad(keep: bool) -> (Core<FakeEngine>, NodeId, NodeId) {
         let mut c = core();
         c.mount_root(&crate::ui::Root::new::<Pad>(move || PadProps { keep }));
         let batch = c.commit().unwrap();
@@ -7013,7 +7161,7 @@ mod touch {
 
     #[test]
     fn an_element_claims_the_touches_on_start_and_blocks_scrolling() {
-        let (mut c, outer, inner) = pad(false);
+        let (mut c, outer, inner) = mount_pad(false);
         let path = [inner, outer];
         // The root's touches: the components hear theirs, JS still gets
         // the event for its own nodes.
@@ -7050,7 +7198,7 @@ mod touch {
 
     #[test]
     fn a_capturing_claim_takes_the_touches_over_unless_they_are_kept() {
-        let (mut c, outer, inner) = pad(false);
+        let (mut c, outer, inner) = mount_pad(false);
         let path = [inner, outer];
         let send = |c: &mut Core<FakeEngine>, phase, x, t| {
             c.component_event(ROOT_ID, EventKind::Touch, &touch(phase, &path, x, t));
@@ -7071,7 +7219,7 @@ mod touch {
         );
 
         // An inner responder that keeps the touches rejects the claim.
-        let (mut c, outer, inner) = pad(true);
+        let (mut c, outer, inner) = mount_pad(true);
         let path = [inner, outer];
         let send = |c: &mut Core<FakeEngine>, phase, x, t| {
             c.component_event(ROOT_ID, EventKind::Touch, &touch(phase, &path, x, t));
@@ -7089,7 +7237,7 @@ mod touch {
 
     #[test]
     fn js_and_component_responders_share_the_native_block() {
-        let (mut c, outer, inner) = pad(false);
+        let (mut c, outer, inner) = mount_pad(false);
         apply(
             &mut c,
             vec![
@@ -7659,7 +7807,7 @@ mod views {
     use super::*;
     use crate::{
         Prop,
-        ui::{Component, Each, If, Props, Registry, Root, Scope, prelude::*},
+        ui::{Component, Props, Registry, Root, Scope, prelude::*},
     };
 
     fn texts(batch: &MountBatch) -> Vec<String> {
@@ -7793,6 +7941,57 @@ mod views {
         assert!(texts(&c.commit().unwrap()).contains(&"log abcd".to_owned()));
     }
 
+    #[derive(Event)]
+    enum ChooserEvent {
+        Press,
+        Pick(u32),
+        Placed { at: u32 },
+    }
+
+    /// Emits each of its events on a press: a press, the pick 7, the
+    /// placement at 9.
+    #[component]
+    fn Chooser(cx: Scope<ChooserEvent>) -> impl IntoElement {
+        view().child(text("choose")).on_press(move || {
+            cx.emit(ChooserEvent::Press);
+            cx.emit(ChooserEvent::Pick(7));
+            cx.emit(ChooserEvent::Placed { at: 9 });
+        })
+    }
+
+    /// A [`Chooser`] heard through its events' listener methods.
+    #[component]
+    fn Chosen() -> impl IntoElement {
+        let log = signal(String::new());
+        let note = move |s: String| log.update(|l| l.push_str(&s));
+        view()
+            .child(
+                chooser()
+                    .on_press(move || note("press ".into()))
+                    .on_press(move |_: &()| note("again ".into()))
+                    .on_pick(move |index: &u32| note(format!("pick {index} ")))
+                    .on_placed(move |event: &ChooserEvent| {
+                        if let ChooserEvent::Placed { at } = event {
+                            note(format!("placed {at}"));
+                        }
+                    }),
+            )
+            .child(text(move || format!("log {}", log.get())))
+    }
+
+    #[test]
+    fn a_components_listener_methods_hear_their_event_and_its_data() {
+        let mut c = core();
+        c.mount_root(&Root::new::<Chosen>(|| ()));
+        let batch = c.commit().unwrap();
+        let chooser = native_parent(&c, text_node(&batch, "choose")).unwrap();
+        assert!(c.component_event(chooser, EventKind::Press, &EventPayload::None));
+        assert_eq!(
+            texts(&c.commit().unwrap()),
+            ["log press again pick 7 placed 9"]
+        );
+    }
+
     /// A region made again with what it read: its pressable text is kept
     /// (the same node), its listener the new run's.
     #[component]
@@ -7887,7 +8086,7 @@ mod views {
                 .on_press(move |_: &()| on.update(|v| *v = !*v))
                 .child(text("before"))
                 .child(
-                    If::new(on, || {
+                    when(on, || {
                         cleanup(|| CLEANED.with(|c| c.set(c.get() + 1)));
                         text("on")
                     })
@@ -7949,12 +8148,13 @@ mod views {
                     on.set(false);
                 })
                 .child(
-                    If::new(on, || Counter::element(CounterProps { label: "On".into() }))
-                        .otherwise(|| {
+                    when(on, || Counter::element(CounterProps { label: "On".into() })).otherwise(
+                        || {
                             Counter::element(CounterProps {
                                 label: "Off".into(),
                             })
-                        }),
+                        },
+                    ),
                 )
         }
     }
@@ -7992,7 +8192,7 @@ mod views {
         fn view(_: RowsProps, _: Scope<NoEvent>) -> impl IntoElement {
             let items = signal(vec![1, 2, 3]);
             ITEMS.with(|i| i.set(Some(items)));
-            view().child(Each::new(
+            view().child(each(
                 items,
                 |n| *n,
                 |item, index| {
@@ -8040,7 +8240,7 @@ mod views {
                 "{} {} {}",
                 if dark() { "dark" } else { "light" },
                 ticks.get(),
-                theme().radius
+                tokens().number("radius").unwrap()
             )
         }))
     }
@@ -8088,9 +8288,7 @@ mod views {
         view()
             .on_press(move |_: &()| first.update(|f| *f = !*f))
             .child(dynamic(move || {
-                Intro::element(IntroProps {
-                    label: if first.get() { "one" } else { "two" }.into(),
-                })
+                intro().label(if first.get() { "one" } else { "two" })
             }))
     }
 
@@ -8178,8 +8376,8 @@ mod views {
         let colors = |batch: &MountBatch| {
             batch.items.iter().find_map(|i| match i {
                 MountItem::Animation(
-                    nsh_animation::AnimationOp::CreateInterpolate { output, .. }
-                    | nsh_animation::AnimationOp::SetOutput { output, .. },
+                    crate::animation::AnimationOp::CreateInterpolate { output, .. }
+                    | crate::animation::AnimationOp::SetOutput { output, .. },
                 ) => Some(output.clone()),
                 _ => None,
             })
@@ -8188,7 +8386,9 @@ mod views {
         c.mount_root(&Root::new::<Track>(|| ()));
         assert_eq!(
             colors(&c.commit().unwrap()),
-            Some(nsh_animation::Output::Colors(vec![0xeeeeeeff, 0x00ff00ff]))
+            Some(crate::animation::Output::Colors(vec![
+                0xeeeeeeff, 0x00ff00ff
+            ]))
         );
         c.set_environment(crate::ui::Environment {
             dark: true,
@@ -8198,11 +8398,13 @@ mod views {
         let batch = c.commit().unwrap();
         assert_eq!(
             colors(&batch),
-            Some(nsh_animation::Output::Colors(vec![0x222222ff, 0x00ff00ff]))
+            Some(crate::animation::Output::Colors(vec![
+                0x222222ff, 0x00ff00ff
+            ]))
         );
         assert!(!batch.items.iter().any(|i| matches!(
             i,
-            MountItem::Animation(nsh_animation::AnimationOp::CreateInterpolate { .. })
+            MountItem::Animation(crate::animation::AnimationOp::CreateInterpolate { .. })
         )));
     }
 
@@ -8235,8 +8437,8 @@ mod views {
                 .iter()
                 .filter_map(|i| match i {
                     MountItem::Animation(
-                        nsh_animation::AnimationOp::CreateInterpolate { output, .. }
-                        | nsh_animation::AnimationOp::SetOutput { output, .. },
+                        crate::animation::AnimationOp::CreateInterpolate { output, .. }
+                        | crate::animation::AnimationOp::SetOutput { output, .. },
                     ) => Some(output.clone()),
                     _ => None,
                 })
@@ -8244,7 +8446,7 @@ mod views {
             outputs.sort_by_key(|o| format!("{o:?}"));
             outputs
         };
-        let colors = |off: u32| nsh_animation::Output::Colors(vec![off, 0x00ff00ff]);
+        let colors = |off: u32| crate::animation::Output::Colors(vec![off, 0x00ff00ff]);
         let mut c = core();
         c.mount_root(&Root::new::<SharedLight>(|| ()));
         assert_eq!(outputs(&c.commit().unwrap()), vec![colors(0x000000ff); 3]);
@@ -8556,7 +8758,7 @@ mod views {
 
         fn view(props: PocketProps, _: Scope<NoEvent>) -> impl IntoElement {
             let children = props.children;
-            view().child(If::new(props.open, move || view().p_2().child(children)))
+            view().child(when(props.open, move || view().p_2().child(children)))
         }
     }
 
@@ -8593,9 +8795,9 @@ mod views {
             Holder::element(HolderProps {
                 children: Children::default(),
             })
-            .child(If::new(open, || {
+            .child(when(open, || {
                 vec![
-                    Label::element(()).into_element(),
+                    label().into_element(),
                     text("plain").into_element(),
                     Holder::element(HolderProps {
                         children: Children::default(),
@@ -8647,7 +8849,7 @@ mod views {
             let children = props.children;
             view()
                 .on_press(move || shown.update(|s| *s = !*s))
-                .child(If::new(shown, move || {
+                .child(when(shown, move || {
                     Holder::element(HolderProps {
                         children: Children::default(),
                     })
@@ -8676,7 +8878,7 @@ mod views {
                     children: Children::default(),
                 })
                 .child(text("a"))
-                .child(If::new(middle, || text("b")))
+                .child(when(middle, || text("b")))
                 .child(text("c")),
             )
         }
@@ -8928,9 +9130,7 @@ mod views {
             view()
                 .on_press(move || shown.update(|s| *s = !*s))
                 .child(text(move || format!("empty {}", children.get().is_empty())))
-                .child(If::new(shown, move || {
-                    view().child(children.get_untracked())
-                }))
+                .child(when(shown, move || view().child(children.get_untracked())))
         }
     }
 
@@ -8949,12 +9149,9 @@ mod views {
     #[component]
     fn Giver() -> impl IntoElement {
         let on = signal(true);
-        view().on_press(move || on.update(|o| *o = !*o)).child(
-            PassOn::element(HolderProps {
-                children: Children::default(),
-            })
-            .child(If::new(on, || text("given"))),
-        )
+        view()
+            .on_press(move || on.update(|o| *o = !*o))
+            .child(pass_on().child(when(on, || text("given"))))
     }
 
     #[test]
@@ -9065,6 +9262,159 @@ mod views {
                 "only nodes' own ids"
             );
         }
+    }
+
+    /// A press target with no look: presses, its selection for screen
+    /// readers, and the app's styles.
+    #[derive(Default)]
+    struct Key;
+
+    #[derive(Clone, PartialEq, Props)]
+    struct KeyProps {
+        #[prop(default)]
+        selected: crate::ui::Prop<bool>,
+    }
+
+    impl Component for Key {
+        type Props = KeyProps;
+        type Event = NoEvent;
+
+        fn view(props: KeyProps, _: Scope<NoEvent>) -> impl IntoElement {
+            let selected = props.selected;
+            view()
+                .size_10()
+                .accessibility_state(move || crate::AccessibilityState {
+                    selected: selected.get(),
+                    ..crate::AccessibilityState::default()
+                })
+                .on_press(|| {})
+        }
+    }
+
+    /// Two keys in a row, styled per state as an app styles a `Button`.
+    #[derive(Default)]
+    struct Keys;
+
+    #[derive(Clone, PartialEq, Props)]
+    struct KeysProps {}
+
+    impl Component for Keys {
+        type Props = KeysProps;
+        type Event = NoEvent;
+
+        fn view(_: KeysProps, _: Scope<NoEvent>) -> impl IntoElement {
+            let key = |selected: bool| {
+                Key::element(KeyProps {
+                    selected: selected.into(),
+                })
+                .bg(rgb(0x0000ff))
+                .selected(|s| s.bg(rgb(0x00ff00)))
+                .hover(|s| s.opacity(0.5))
+                .active(|s| s.bg(rgb(0xff0000)))
+            };
+            view().flex_row().child(key(false)).child(key(true))
+        }
+    }
+
+    #[test]
+    fn a_nested_components_state_styles_follow_its_roots_states() {
+        use crate::tailwind::state::{HOVERED, PRESSED};
+        let mut c = core();
+        c.mount_root(&Root::new::<Keys>(|| KeysProps {}));
+        let batch = c.commit().unwrap();
+        // The keys' roots report presses and hovers to the core.
+        let tracked = |id: NodeId| {
+            batch.items.iter().any(|i| {
+                matches!(i, MountItem::TrackStates { id: v, states }
+                    if *v == id && states & (PRESSED | HOVERED) == PRESSED | HOVERED)
+            })
+        };
+        let roots: Vec<NodeId> = batch
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                MountItem::TrackStates { id, .. } if tracked(*id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(roots.len(), 2, "{:?}", batch.items);
+        let is_selected = |id: NodeId| {
+            batch.items.iter().any(|i| {
+                matches!(i, MountItem::ViewProps { id: v, props }
+                    if *v == id && props.accessibility.state.selected)
+            })
+        };
+        let (selected, plain) = match is_selected(roots[0]) {
+            true => (roots[0], roots[1]),
+            false => (roots[1], roots[0]),
+        };
+        let background =
+            |batch: &MountBatch, id| view_style_of(batch, id).map(|s| s.background_color);
+        assert_eq!(background(&batch, plain), Some(crate::Color(0x0000ffff)));
+        assert_eq!(
+            background(&batch, selected),
+            Some(crate::Color(0x00ff00ff)),
+            "selected:"
+        );
+        c.set_states(plain, PRESSED | HOVERED);
+        let batch = c.commit().unwrap();
+        let style = view_style_of(&batch, plain).expect("restyled");
+        assert_eq!(style.background_color, crate::Color(0xff0000ff), "active:");
+        assert_eq!(style.opacity, 0.5, "hover:");
+        c.set_states(plain, 0);
+        let batch = c.commit().unwrap();
+        assert_eq!(background(&batch, plain), Some(crate::Color(0x0000ffff)));
+    }
+
+    /// A page whose header's colors are typed styles, theme colors among
+    /// them.
+    #[derive(Default)]
+    struct Page;
+
+    #[derive(Clone, PartialEq, Props)]
+    struct PageProps {}
+
+    impl Component for Page {
+        type Props = PageProps;
+        type Event = NoEvent;
+
+        // The core's own stack and screen: `nsh_base`'s wrap them.
+        #[allow(deprecated)]
+        fn view(_: PageProps, _: Scope<NoEvent>) -> impl IntoElement {
+            stack().flex_1().child(
+                screen()
+                    .title("Page")
+                    .header_style_with(|s| {
+                        s.bg(AdaptiveColor::rgb(0xffffff, 0x000000))
+                            .text_color(rgb(0x00ff00))
+                            .tint_color(rgb(0x0000ff))
+                    })
+                    .child(view().flex_1()),
+            )
+        }
+    }
+
+    #[test]
+    fn typed_header_styles_reach_the_screens_config() {
+        let mut c = core();
+        c.mount_root(&Root::new::<Page>(|| PageProps {}));
+        let config = |batch: &MountBatch| {
+            batch.items.iter().find_map(|i| match i {
+                MountItem::ScreenConfig { config, .. } => Some((**config).clone()),
+                _ => None,
+            })
+        };
+        let first = config(&c.commit().unwrap()).expect("a screen");
+        assert_eq!(first.background_color, Some(crate::Color(0xffffffff)));
+        assert_eq!(first.title_color, Some(crate::Color(0x00ff00ff)));
+        assert_eq!(first.tint_color, Some(crate::Color(0x0000ffff)));
+        // Dark appearance: the theme color switches natively.
+        c.set_class_environment(crate::tailwind::ClassEnvironment {
+            dark: true,
+            ..Default::default()
+        });
+        let dark = config(&c.commit().unwrap()).expect("restyled");
+        assert_eq!(dark.background_color, Some(crate::Color(0x000000ff)));
     }
 
     /// A holder of its children as its view's root.
@@ -9352,15 +9702,12 @@ mod views {
         let n = signal(0);
         view()
             .on_press(move || n.update(|n| *n += 1))
-            .child(Mid::element(MidProps::default()).fill("corner", text("deep")))
-            .child(Mid::element(MidProps::default()).fill(
-                "corner",
-                dynamic(move || match n.get() % 3 {
-                    0 => Some(text("switched").into_element()),
-                    1 => None,
-                    _ => Some(view().child(text("boxed")).into_element()),
-                }),
-            ))
+            .child(mid().corner(text("deep")))
+            .child(mid().corner(dynamic(move || match n.get() % 3 {
+                0 => Some(text("switched").into_element()),
+                1 => None,
+                _ => Some(view().child(text("boxed")).into_element()),
+            })))
     }
 
     #[test]
@@ -9648,9 +9995,9 @@ mod views {
     /// A dial with a ref, as its view's root or inside a view.
     #[component]
     fn DialPanel(props: DialPanelProps) -> impl IntoElement {
-        let dial = component_ref::<Dial>();
-        DIAL.with(|d| d.set(Some(dial)));
-        let el = Dial::element(()).component_ref(&dial);
+        let handle = component_ref::<Dial>();
+        DIAL.with(|d| d.set(Some(handle)));
+        let el = Dial::element(()).component_ref(&handle);
         if props.rooted {
             el.into_element()
         } else {
@@ -9699,7 +10046,7 @@ mod views {
                         children: Children::default(),
                     })
                     .child(text("before"))
-                    .child(If::new(open, || text("open")))
+                    .child(when(open, || text("open")))
                     .child(text("after")),
                 )
         }
@@ -10033,7 +10380,7 @@ mod views {
                 } else {
                     crate::ui::Prop::bind(move || format!("n {}", n.get()).into())
                 };
-                Shown::element(ShownProps { value })
+                shown().value(value)
             }))
     }
 
@@ -10062,7 +10409,7 @@ mod views {
         view()
             .on_press(move |_: &()| shown.set(false))
             .child(text(move || format!("k {}", count.get())))
-            .child(If::new(shown, move || {
+            .child(when(shown, move || {
                 on_key("mod+k", move |_| count.update(|c| *c += 1));
                 view()
             }))
@@ -10149,7 +10496,7 @@ mod views {
         let shown = signal(true);
         view()
             .on_press(move |_: &()| shown.set(false))
-            .child(If::new(shown, || Leafy::element(())))
+            .child(when(shown, leafy))
     }
 
     #[test]
@@ -10818,5 +11165,535 @@ mod builders {
         assert_eq!(run::<ChildrenTogether>(|| (), &[]), one_by_one);
         assert!(one_by_one[0].contains("\"row 1\""));
         assert!(one_by_one[0].contains("\"right\""));
+    }
+
+    /// The setters of host elements' own options, each given a closure
+    /// of `flipped`.
+    #[component]
+    fn BoundOptions() -> impl IntoElement {
+        let flipped = signal(false);
+        let pick =
+            move |a: &'static str, b: &'static str| move || if flipped.get() { b } else { a };
+        view()
+            .child(text("flip").on_press(move || flipped.set(true)))
+            .child(
+                text("lines")
+                    .number_of_lines(move || if flipped.get() { 2_u32 } else { 1 })
+                    .selectable(flipped)
+                    .max_font_size_multiplier(move || if flipped.get() { 3.0_f32 } else { 1.5 }),
+            )
+            .child(
+                image("a.png")
+                    .resize_mode(move || {
+                        if flipped.get() {
+                            crate::ResizeMode::Contain
+                        } else {
+                            crate::ResizeMode::Cover
+                        }
+                    })
+                    .placeholder(pick("before.png", "after.png"))
+                    .fade_duration(move || if flipped.get() { 300.0_f32 } else { 100.0 }),
+            )
+            .child(web_view(pick(
+                "https://before.test/",
+                "https://after.test/",
+            )))
+            .child(video(pick(
+                "https://before.test/v.mp4",
+                "https://after.test/v.mp4",
+            )))
+            .child(native("map").prop("zoom", move || {
+                serde_json::json!(if flipped.get() { 9 } else { 4 })
+            }))
+    }
+
+    #[test]
+    fn host_options_take_signals_and_closures() {
+        let frames = run::<BoundOptions>(|| (), &["flip"]);
+        for before in [
+            "before.png",
+            "https://before.test/",
+            "https://before.test/v.mp4",
+            "Number(4)",
+            "Cover",
+            "fade_ms: Some(100.0)",
+            "max_lines: 1",
+            "selectable: Some(false)",
+        ] {
+            assert!(frames[0].contains(before), "{before} in {}", frames[0]);
+        }
+        for after in [
+            "after.png",
+            "https://after.test/",
+            "https://after.test/v.mp4",
+            "Number(9)",
+            "resize_mode: Contain",
+            "fade_ms: Some(300.0)",
+            "max_lines: 2",
+            "selectable: Some(true)",
+        ] {
+            assert!(frames[1].contains(after), "{after} in {}", frames[1]);
+        }
+        for gone in ["before.png", "before.test"] {
+            assert!(!frames[1].contains(gone), "{gone} in {}", frames[1]);
+        }
+    }
+
+    #[test]
+    fn a_status_bar_style_is_a_setting() {
+        let setting = crate::StatusBarStyle::Light.into_reactive();
+        assert_eq!(
+            setting.get(),
+            StatusBarSetting::default().foreground(crate::StatusBarStyle::Light)
+        );
+    }
+}
+
+/// Render functions (`Option<Renderer<T>>` props) and the app's classes on
+/// a view's elements (`app_class`).
+mod renders {
+    use serde_json::json;
+
+    use super::*;
+    use crate::{
+        Prop,
+        ui::{AnyValue, Props, Registry, Rendered, Renderer, Root, dynamic, prelude::*},
+    };
+
+    /// Renders each item (`key:label`) with the app's function, keyed by
+    /// its key; in one paragraph when `inline`.
+    #[derive(Clone, PartialEq, Props)]
+    struct ShelfProps {
+        #[prop(default)]
+        items: crate::ui::Prop<Vec<String>>,
+        #[prop(default)]
+        inline: bool,
+        render_item: crate::ui::Prop<Option<Renderer<String>>>,
+    }
+
+    fn split(item: &str) -> (String, String) {
+        let (key, label) = item.split_once(':').unwrap_or((item, item));
+        (key.to_owned(), label.to_owned())
+    }
+
+    #[component]
+    fn Shelf(props: ShelfProps) -> impl IntoElement {
+        let rows = each(
+            props.items,
+            |item: &String| split(item).0,
+            move |item, _| {
+                // (A row's root is a node: an `Each` keeps rows by it.)
+                view().child(dynamic(move || -> Option<Rendered> {
+                    let (key, label) = split(&item.get());
+                    props.render_item.get().map(|r| r.render(key, label))
+                }))
+            },
+        );
+        if props.inline {
+            text("on the shelf: ").child(rows).into_element()
+        } else {
+            view().child(rows).into_element()
+        }
+    }
+
+    fn core_with_shelf(inline: bool) -> Core<FakeEngine> {
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Shelf>();
+        c.set_components(registry);
+        let mut ops = vec![
+            Op::Create {
+                id: 2,
+                tag: Tag::View,
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::Component(std::any::type_name::<Shelf>().into()),
+            },
+            Op::SetProp {
+                id: 2,
+                prop: Prop::RustProp(
+                    "renderItem",
+                    Some(AnyValue::new(Some(Renderer::<String>::__js_of(
+                        "renderItem",
+                        2,
+                    )))),
+                ),
+            },
+            items(&["a:Apple", "b:Banana"]),
+        ];
+        if inline {
+            ops.push(Op::SetProp {
+                id: 2,
+                prop: rust_prop::<ShelfProps>("inline", Some(json!(true))),
+            });
+        }
+        ops.push(Op::Insert {
+            parent: ROOT_ID,
+            child: 2,
+            before: None,
+        });
+        apply(&mut c, ops);
+        c
+    }
+
+    fn items(items: &[&str]) -> Op {
+        Op::SetProp {
+            id: 2,
+            prop: rust_prop::<ShelfProps>("items", Some(json!(items))),
+        }
+    }
+
+    /// What the core asked JS: `$render key value` / `$unrender key`.
+    fn asked(c: &mut Core<FakeEngine>) -> Vec<String> {
+        js_events(c)
+            .into_iter()
+            .filter_map(|(host, _, payload)| match payload {
+                EventPayload::Native { name, data } if name.starts_with("$") => {
+                    assert_eq!(host, 2);
+                    assert_eq!(data["prop"], "renderItem");
+                    let key = data["key"].as_str().unwrap().to_owned();
+                    Some(match data.get("value") {
+                        Some(v) => format!("{name} {key} {}", v.as_str().unwrap()),
+                        None => format!("{name} {key}"),
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// JS's answer to `$render key`: holder `holder` with a text of
+    /// `label`, inserted into the host.
+    fn holder(holder: NodeId, key: &str, label: &str) -> Vec<Op> {
+        vec![
+            Op::Create {
+                id: holder,
+                tag: Tag::View,
+            },
+            Op::SetProp {
+                id: holder,
+                prop: Prop::ComponentRender(format!("renderItem\u{1f}{key}").into()),
+            },
+            Op::Create {
+                id: holder + 2,
+                tag: Tag::Text,
+            },
+            Op::CreateText {
+                id: holder + 4,
+                text: label.into(),
+            },
+            Op::Insert {
+                parent: holder + 2,
+                child: holder + 4,
+                before: None,
+            },
+            Op::Insert {
+                parent: holder,
+                child: holder + 2,
+                before: None,
+            },
+            Op::Insert {
+                parent: 2,
+                child: holder,
+                before: None,
+            },
+        ]
+    }
+
+    fn parent_of(c: &Core<FakeEngine>, id: NodeId) -> Option<NodeId> {
+        let key = c.key(id).ok()?;
+        let parent = c.nodes[key as usize].parent;
+        (parent != NO_KEY).then(|| c.nodes[parent as usize].id)
+    }
+
+    #[test]
+    fn js_renders_each_key_once_per_value_and_releases_it() {
+        let mut c = core_with_shelf(false);
+        c.commit().unwrap();
+        assert_eq!(asked(&mut c), ["$render a Apple", "$render b Banana"]);
+        apply(&mut c, holder(10, "a", "Apple"));
+        apply(&mut c, holder(20, "b", "Banana"));
+        c.commit().unwrap();
+        // Each holder is the only child of its placeholder, a view of the
+        // core's in the component's view.
+        let (a, b) = (parent_of(&c, 10).unwrap(), parent_of(&c, 20).unwrap());
+        assert_eq!((a % 2, b % 2), (1, 1));
+        assert_ne!(a, b);
+        // In their rows.
+        let row = |p| parent_of(&c, p).and_then(|r| parent_of(&c, r));
+        assert_eq!(row(a), row(b));
+        assert!(asked(&mut c).is_empty());
+        // An equal value asks nothing; a new one asks again; the holder of
+        // the new render replaces the old one.
+        apply(&mut c, vec![items(&["a:Apple", "b:Banana"])]);
+        let _ = c.commit();
+        assert!(asked(&mut c).is_empty());
+        apply(&mut c, vec![items(&["a:Avocado", "b:Banana"])]);
+        let _ = c.commit();
+        assert_eq!(asked(&mut c), ["$render a Avocado"]);
+        apply(&mut c, holder(30, "a", "Avocado"));
+        apply(
+            &mut c,
+            vec![
+                Op::Remove {
+                    parent: 2,
+                    child: 10,
+                },
+                Op::Release { id: 10 },
+            ],
+        );
+        c.commit().unwrap();
+        assert_eq!(parent_of(&c, 30), Some(a));
+        // A key that leaves is released once.
+        apply(&mut c, vec![items(&["b:Banana"])]);
+        let _ = c.commit();
+        assert_eq!(asked(&mut c), ["$unrender a"]);
+        assert_eq!(parent_of(&c, 30), None, "out of the tree");
+        assert!(c.key(a).is_err(), "the placeholder went");
+        apply(
+            &mut c,
+            vec![
+                Op::Remove {
+                    parent: 2,
+                    child: 30,
+                },
+                Op::Release { id: 30 },
+            ],
+        );
+        let _ = c.commit();
+        assert!(asked(&mut c).is_empty());
+        // Back: rendered again.
+        apply(&mut c, vec![items(&["a:Apple", "b:Banana"])]);
+        let _ = c.commit();
+        assert_eq!(asked(&mut c), ["$render a Apple"]);
+        // The host goes: nothing is left of its renders.
+        apply(
+            &mut c,
+            vec![
+                Op::Remove {
+                    parent: ROOT_ID,
+                    child: 2,
+                },
+                Op::Release { id: 2 },
+            ],
+        );
+        let _ = c.commit();
+        assert!(c.components.renders.is_empty());
+    }
+
+    #[test]
+    fn a_holder_coming_after_its_key_left_stays_out_of_the_tree() {
+        let mut c = core_with_shelf(false);
+        c.commit().unwrap();
+        asked(&mut c);
+        apply(&mut c, vec![items(&["b:Banana"])]);
+        let _ = c.commit();
+        assert_eq!(asked(&mut c), ["$unrender a"]);
+        // JS answers the first ask after the core moved on.
+        apply(&mut c, holder(10, "a", "Apple"));
+        let _ = c.commit();
+        assert_eq!(parent_of(&c, 10), None);
+    }
+
+    #[test]
+    fn renders_in_a_paragraph_are_inline_views() {
+        let mut c = core_with_shelf(true);
+        c.commit().unwrap();
+        assert_eq!(asked(&mut c), ["$render a Apple", "$render b Banana"]);
+        apply(&mut c, holder(10, "a", "Apple"));
+        let batch = c.commit().unwrap();
+        let place = parent_of(&c, 10).unwrap();
+        // The row is an inline view of the paragraph.
+        let paragraph = parent_of(&c, parent_of(&c, place).unwrap()).unwrap();
+        let key = c.key(paragraph).unwrap();
+        assert_eq!(c.nodes[key as usize].kind, Kind::Text);
+        // Laid out as an attachment of the paragraph: it has a frame.
+        assert!(frame_of(&batch, place).is_some(), "{:?}", batch.items);
+    }
+
+    /// A Rust view passing a closure: rendered on the spot.
+    #[derive(Clone, PartialEq, Props)]
+    struct ShelvesProps {}
+
+    #[component]
+    fn Shelves(_props: ShelvesProps) -> impl IntoElement {
+        shelf()
+            .items(vec!["a:Apple".to_owned(), "b:Banana".to_owned()])
+            .render_item(|label| text(format!("[{label}]")))
+    }
+
+    #[test]
+    fn a_rust_renderer_renders_in_place() {
+        let mut c = core();
+        c.mount_root(&Root::new::<Shelves>(|| ShelvesProps {}));
+        let batch = c.commit().unwrap();
+        let texts: Vec<_> = batch
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                MountItem::Text { text, .. } => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["[Apple]", "[Banana]"]);
+        assert!(js_events(&mut c).is_empty());
+    }
+
+    /// A view styling a part with the app's classes.
+    #[derive(Clone, PartialEq, Props)]
+    struct CardProps {
+        #[prop(default)]
+        heading_class: crate::ui::Prop<Option<SharedString>>,
+    }
+
+    #[component]
+    fn Card(props: CardProps) -> impl IntoElement {
+        view().child(
+            view()
+                .bg(crate::ui::palette::RED.shade(500))
+                .border_2()
+                .app_class(props.heading_class),
+        )
+    }
+
+    fn core_with_card(class: &str) -> Core<FakeEngine> {
+        let mut c = core();
+        let mut registry = Registry::new();
+        registry.register::<Card>();
+        c.set_components(registry);
+        apply(
+            &mut c,
+            vec![
+                Op::Create {
+                    id: 2,
+                    tag: Tag::View,
+                },
+                Op::SetProp {
+                    id: 2,
+                    prop: Prop::Component(std::any::type_name::<Card>().into()),
+                },
+                card_class(class),
+                Op::Insert {
+                    parent: ROOT_ID,
+                    child: 2,
+                    before: None,
+                },
+            ],
+        );
+        c
+    }
+
+    fn card_class(class: &str) -> Op {
+        Op::SetProp {
+            id: 2,
+            prop: rust_prop::<CardProps>("headingClass", Some(json!(class))),
+        }
+    }
+
+    /// The heading's view: the host's only child.
+    fn heading(c: &Core<FakeEngine>) -> NodeId {
+        let key = c.key(2).unwrap();
+        let child = c.nodes[key as usize].children[0];
+        c.nodes[child as usize].id
+    }
+
+    #[test]
+    fn the_apps_classes_go_after_an_elements_own_styles() {
+        let mut c = core_with_card("bg-white dark:bg-black");
+        let batch = c.commit().unwrap();
+        let id = heading(&c);
+        let style = view_style_of(&batch, id).unwrap();
+        // The app's background wins; the view's own border stays.
+        assert_eq!(style.background_color, Color(0xffff_ffff));
+        assert_eq!(style.borders.widths.to_array().map(|w| w.0), [2.0; 4]);
+        // Dark: the app's dark variant.
+        c.set_class_environment(crate::tailwind::ClassEnvironment {
+            dark: true,
+            ..Default::default()
+        });
+        let batch = c.commit().unwrap();
+        assert_eq!(
+            view_style_of(&batch, id).unwrap().background_color,
+            Color(0x0000_00ff)
+        );
+        // Another class from the app: applied again, on the same node.
+        apply(&mut c, vec![card_class("bg-red-500 dark:bg-white")]);
+        let batch = c.commit().unwrap();
+        assert_eq!(heading(&c), id);
+        assert_eq!(
+            view_style_of(&batch, id).unwrap().background_color,
+            Color(0xffff_ffff)
+        );
+        // None: the view's own.
+        apply(
+            &mut c,
+            vec![Op::SetProp {
+                id: 2,
+                prop: rust_prop::<CardProps>("headingClass", None),
+            }],
+        );
+        let batch = c.commit().unwrap();
+        assert_eq!(
+            view_style_of(&batch, id).unwrap().background_color,
+            Color::from(crate::ui::palette::RED.shade(500))
+        );
+    }
+}
+
+mod rust_selection_area {
+    use std::cell::Cell;
+
+    use super::*;
+    use crate::ui::{Root, prelude::*};
+
+    thread_local! {
+        static AREA: Cell<Option<Signal<bool>>> = const { Cell::new(None) };
+    }
+
+    #[component]
+    fn Area() -> impl IntoElement {
+        let area = signal(true);
+        AREA.set(Some(area));
+        view()
+            .child(
+                view()
+                    .selection_area(move || area.get())
+                    .child(text("inside")),
+            )
+            .child(view().child(text("outside")))
+    }
+
+    /// `Element::selection_area` reaches the platform in the view's props,
+    /// follows its signal, and views without it get no props for it.
+    #[test]
+    fn a_selection_area_is_a_view_prop() {
+        let mut c = core();
+        c.mount_root(&Root::of::<Area>());
+        let batch = c.commit().unwrap();
+        let areas: Vec<_> = batch
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                MountItem::ViewProps { id, props } if props.selection_area => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(areas.len(), 1, "{:?}", batch.items);
+        assert!(
+            !batch.items.iter().any(
+                |item| matches!(item, MountItem::ViewProps { props, .. } if !props.selection_area)
+            ),
+            "views without the flag get no props: {:?}",
+            batch.items
+        );
+        {
+            let _entered = c.components.runtime.enter();
+            AREA.get().unwrap().set(false);
+        }
+        let batch = c.commit().unwrap();
+        assert!(batch.items.iter().any(
+            |item| matches!(item, MountItem::ViewProps { id, props } if *id == areas[0] && !props.selection_area)
+        ));
     }
 }

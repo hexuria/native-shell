@@ -31,7 +31,7 @@ struct App {
 
 /// The two benchmark screens, parameterized by the Button under test.
 const BUTTONS: &str = r#"import { type Component, Scroll, signal, Text, View } from "nsh";
-import { List } from "nsh/list";
+import { List } from "nsh";
 
 export interface BenchButtonProps {
   title: string;
@@ -96,7 +96,7 @@ export interface ButtonProps {
 
 const base = "flex-row items-center justify-center rounded-xl px-4 py-3 disabled:opacity-50";
 
-// The default theme's colors (`nsh_core::ui::Theme`).
+// The default theme's colors (`nsh_base::Theme`).
 const variants: Record<NonNullable<ButtonProps["variant"]>, string> = {
   primary:
     "bg-neutral-900 active:bg-neutral-950 text-neutral-50 dark:bg-neutral-50 dark:active:bg-neutral-200 dark:text-neutral-900",

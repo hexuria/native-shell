@@ -111,9 +111,6 @@ fn setup() -> (std::path::PathBuf, nsh_platform_macos::AppOptions) {
     // app's own runtime-delivered modules (the bundle's resources are
     // read-only).
     options.chunks = std::env::var_os("NSH_CHUNK_DIR").map(std::path::PathBuf::from);
-    // `--script` steps (screenshots, simulated input) for checks
-    // (`nsh run --script`).
-    options.script = std::env::var("NSH_SCRIPT").ok();
     (dir, options)
 }
 

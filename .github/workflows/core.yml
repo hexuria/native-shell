@@ -12,9 +12,9 @@ on:
   push:
     branches: [main]
     paths:
-      - "crates/nsh-animation/**"
       - "crates/nsh-bundler/**"
       - "crates/nsh-core/**"
+      - "crates/nsh-dev/**"
       - "crates/nsh-engine/**"
       - "crates/nsh-js/**"
       - "crates/nsh-macros/**"
@@ -32,9 +32,9 @@ on:
       - ".github/workflows/core.yml"
   pull_request:
     paths:
-      - "crates/nsh-animation/**"
       - "crates/nsh-bundler/**"
       - "crates/nsh-core/**"
+      - "crates/nsh-dev/**"
       - "crates/nsh-engine/**"
       - "crates/nsh-js/**"
       - "crates/nsh-macros/**"
@@ -69,9 +69,9 @@ env:
   # The bundler as the command line builds it (`bundle`: rolldown and the
   # whole pipeline), so its tests all run.
   PACKAGES: >-
-    -p nsh-core -p nsh-animation -p nsh-macros -p nsh-js -p nsh-base -p nsh-engine
+    -p nsh-core -p nsh-macros -p nsh-js -p nsh-base -p nsh-engine
     -p nsh-bundler -p nsh-package -p nsh-testing
-    --features nsh-bundler/bundle,nsh-testing/bundle
+    --features nsh-bundler/bundle,nsh-testing/bundle,nsh-testing/agent
 
 jobs:
   check:

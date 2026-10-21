@@ -4,12 +4,12 @@
 use std::{cell::RefCell, sync::Arc};
 
 use dispatch2::{DispatchQueue, MainThreadBound};
-use nsh_animation::{AnimationProp, AnimationValue};
 use nsh_core::{
     Bounds, Color, Command, EventKind, EventMask, EventPayload, GestureValues, ImageSource,
     KeyboardDismissMode, LayoutAnimation, LayoutCurve, LayoutProperty, LayoutTransition,
     MountBatch, MountItem, NodeId, PayloadValue, Points, ResizeMode, StickyCell, SubmitBehavior,
     ViewKind, ViewProps, ViewStyle,
+    animation::{AnimationProp, AnimationValue},
     geometry::{DevicePixels, point, size},
 };
 use nsh_engine::EngineControl;
@@ -29,7 +29,7 @@ use objc2_ui_kit::{
 use crate::{
     animation::Animator,
     decor::{self, Decor},
-    image::{AssetBase, DecodedImage, ImageLoader, Request},
+    image::{AssetBase, DecodedImage, ImageLoader, Request, not_a_bitmap},
     input::Input,
     native_view::NshView,
     navigation::{ModalHost, ScreenHost, StackHost},
@@ -248,7 +248,7 @@ struct Slot {
     decor: Decor,
     events: EventMask,
     gestures: Gestures,
-    bindings: Vec<(AnimationProp, nsh_animation::NodeId)>,
+    bindings: Vec<(AnimationProp, nsh_core::animation::NodeId)>,
     values: GestureValues,
     /// Values of the gesture nodes when the gesture began: pan x, pan y,
     /// pinch, rotation.
@@ -259,7 +259,7 @@ struct Slot {
     mirrored: bool,
     /// A cell of such a list: mirrored back.
     in_mirrored: bool,
-    scroll_value: Option<nsh_animation::NodeId>,
+    scroll_value: Option<nsh_core::animation::NodeId>,
     /// How a scroll view scrolls (scroll views only).
     behavior: Option<Box<nsh_core::ScrollBehavior>>,
     horizontal: bool,
@@ -383,6 +383,8 @@ pub(crate) struct Mounter {
     sticky: rustc_hash::FxHashMap<NodeId, Vec<StickyCell>>,
     /// The native components the app registered.
     components: crate::component::Components,
+    /// Selection areas (`ViewProps::selection_area`) and their selections.
+    areas: Vec<(NodeId, Retained<crate::selection_area::AreaResponder>)>,
     mtm: MainThreadMarker,
 }
 
@@ -445,6 +447,7 @@ impl Mounter {
             blocked_scrolls: Vec::new(),
             rtl: false,
             components,
+            areas: Vec::new(),
             mtm,
         }
     }
@@ -464,6 +467,30 @@ impl Mounter {
         }
         self.report_finished();
         self.start_image_loads();
+        for (_, area) in &self.areas {
+            area.batch_applied();
+        }
+    }
+
+    /// Node `id`'s view (`nsh test --target ios`).
+    #[cfg(feature = "dev")]
+    pub(crate) fn ui_view(&self, id: NodeId) -> Option<Retained<UIView>> {
+        Some(self.slot(id)?.native.view().retain())
+    }
+
+    /// The text input `id` holds (`None`: it is no input).
+    #[cfg(feature = "dev")]
+    pub(crate) fn input_text(&self, id: NodeId) -> Option<String> {
+        match &self.slot(id)?.native {
+            Native::Input(input) => Some(input.text()),
+            _ => None,
+        }
+    }
+
+    /// Whether a native animation runs.
+    #[cfg(feature = "dev")]
+    pub(crate) fn animating(&self) -> bool {
+        self.animator.animating()
     }
 
     #[inline]
@@ -610,6 +637,9 @@ impl Mounter {
                 // must not find the id, which a new view may take.
                 self.disappearing.remove(&id);
                 self.target.scroll_deleted(id);
+                if let Some(i) = self.areas.iter().position(|(a, _)| *a == id) {
+                    self.areas.remove(i).1.detach();
+                }
                 if let Some(mut s) = self.views.get_mut(id as usize).and_then(Option::take) {
                     // A modal deleted while presented (its subtree released
                     // without a remove) goes away too, as on Android.
@@ -1158,6 +1188,7 @@ impl Mounter {
             return;
         };
         input.count += 1;
+        input.known.clone_from(&text);
         input.update_placeholder();
         let count = input.count;
         self.control.dispatch_event(
@@ -1167,7 +1198,71 @@ impl Mounter {
         );
     }
 
+    /// The user edited input `id` to `text`, with the marked text `marked`
+    /// (`None`: no composition). A composition that starts or changes is
+    /// reported before the `onChangeText` of the text holding it, and one
+    /// that ends after the `onChangeText` of the text it committed, as
+    /// browsers order them.
+    pub(crate) fn input_edited(&mut self, id: NodeId, text: String, marked: Option<String>) {
+        if marked.is_some() {
+            if let Some(Slot {
+                native: Native::Input(input),
+                ..
+            }) = self.slot_mut(id)
+                && let Some(change) = input.compose(marked)
+            {
+                self.composition_changed(id, change);
+            }
+            self.input_changed(id, text);
+        } else {
+            self.input_changed(id, text.clone());
+            self.input_composition(id, text, marked);
+        }
+    }
+
+    /// A UIKit callback of input `id` saw `text` with the marked text
+    /// `marked` (`None`: no composition). Ignored while `text` is an edit
+    /// not reported yet: the callback reporting it follows, so a commit's
+    /// `onChangeText` comes before the composition's end.
+    pub(crate) fn input_composition(&mut self, id: NodeId, text: String, marked: Option<String>) {
+        let Some(Slot {
+            native: Native::Input(input),
+            ..
+        }) = self.slot_mut(id)
+        else {
+            return;
+        };
+        if text != input.known {
+            return;
+        }
+        if let Some(change) = input.compose(marked) {
+            self.composition_changed(id, change);
+        }
+    }
+
+    /// `onCompositionChange` of input `id`, if it listens.
+    fn composition_changed(&self, id: NodeId, (composing, text): (bool, String)) {
+        self.input_event(
+            id,
+            EventKind::CompositionChange,
+            EventPayload::Map(vec![
+                ("composing", nsh_core::PayloadValue::Bool(composing)),
+                ("text", nsh_core::PayloadValue::Str(text)),
+            ]),
+        );
+    }
+
     pub(crate) fn input_focused(&mut self, id: NodeId, focused: bool) {
+        // Leaving an input ends its composition.
+        if !focused
+            && let Some(Slot {
+                native: Native::Input(input),
+                ..
+            }) = self.slot_mut(id)
+            && let Some(change) = input.compose(None)
+        {
+            self.composition_changed(id, change);
+        }
         self.report_state(id, nsh_core::tailwind::state::FOCUSED, focused);
         let Some(s) = self.slot(id) else { return };
         let event = if focused {
@@ -1923,6 +2018,9 @@ impl Mounter {
                 .images
                 .request(id, &image.uri, 0, scale, crate::image::Look::default())
             {
+                Request::Ready(decoded) if decoded.vector => {
+                    log::warn!("canvas image failed: {}", not_a_bitmap(&image.uri));
+                }
                 Request::Ready(decoded) => view.set_image(image.uri.clone(), decoded.image),
                 Request::Pending => {}
             }
@@ -1979,6 +2077,9 @@ impl Mounter {
             {
                 // Canvas images are requested at their natural size.
                 match (&result, key.strip_prefix("0@")) {
+                    (Ok(decoded), Some(uri)) if decoded.vector => {
+                        log::warn!("canvas image failed: {}", not_a_bitmap(uri));
+                    }
                     (Ok(decoded), Some(uri)) => view.set_image(uri.into(), decoded.image.clone()),
                     (Err(message), _) => log::warn!("canvas image failed: {message}"),
                     _ => {}
@@ -2542,6 +2643,11 @@ impl Mounter {
         if let Some(press) = &s.gestures.press {
             press.set_long_press_delay(props.long_press_delay);
         }
+        // Only views that keep their props (which texts below look up).
+        let area =
+            (props.selection_area && s.native.nsh().is_some()).then(|| s.native.view().retain());
+        let was_area = self.areas.iter().any(|(a, _)| *a == id);
+        let Some(s) = self.slot_mut(id) else { return };
         match s.native.nsh() {
             Some(view) => view.set_props(props, &control),
             None => {
@@ -2561,6 +2667,18 @@ impl Mounter {
                 view.setAccessibilityLabel(label.as_deref(), mtm);
                 view.setAccessibilityElementsHidden(props.accessibility.hidden, mtm);
             }
+        }
+        // After the props: the texts below read whether they are in an area.
+        match (area, was_area) {
+            (Some(view), false) => self
+                .areas
+                .push((id, crate::selection_area::AreaResponder::attach(&view, mtm))),
+            (None, true) => {
+                if let Some(i) = self.areas.iter().position(|(a, _)| *a == id) {
+                    self.areas.remove(i).1.detach();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2917,6 +3035,9 @@ impl Mounter {
 
     pub(crate) fn scrolled(&mut self, id: NodeId, offset: CGPoint) {
         self.pin_sticky(id);
+        for (_, area) in &self.areas {
+            area.scrolled();
+        }
         let Some(s) = self.slot(id) else { return };
         if let Some(node) = s.scroll_value {
             let value = if s.horizontal { offset.x } else { offset.y };

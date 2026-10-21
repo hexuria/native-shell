@@ -2,6 +2,7 @@
 //! bottom over a dimmed backdrop, dragged down to close. The drag and the springs run natively: the panel
 //! follows the finger with no engine work per frame.
 
+use nsh_base::{dialog, theme};
 use nsh_core::ui::prelude::*;
 
 use super::colors;
@@ -75,28 +76,28 @@ pub(crate) fn Sheet(props: SheetProps, cx: Scope<SheetEvent>) -> impl IntoElemen
         }
     });
     let children = props.children;
-    view().child(If::new(props.open, move || {
+    view().child(when(props.open, move || {
         let height = untracked(window).height;
-        modal()
+        dialog()
             .animation(ModalAnimation::None)
             // The sheet slides away itself before it goes: nothing closes
             // it natively, every attempt is reported to `on_cancel`.
             .close_on_escape(false)
             .close_on_backdrop_press(false)
             .close_on_swipe(false)
-            .on_cancel(move |_: &()| close())
+            .on_cancel(close)
             .child(
                 // The backdrop fades with the panel's position.
                 view()
                     .absolute()
                     .inset_0()
-                    .bg(move || theme().overlay)
+                    .bg(move || theme().overlay())
                     .bind_opacity(&offset.interpolate(&[0.0, height.0], &[1.0, 0.0]))
                     .label("Close")
                     // For the pointer: Escape and the back button close it
                     // from the keyboard, which goes straight to the panel.
                     .focusable(false)
-                    .on_press(move |_: &()| close()),
+                    .on_press(close),
             )
             .child(
                 view()
@@ -108,7 +109,7 @@ pub(crate) fn Sheet(props: SheetProps, cx: Scope<SheetEvent>) -> impl IntoElemen
                     .pb(move || px(safe_area().bottom.0 + 16.0))
                     .px_4()
                     .gap_3()
-                    .rounded_t(move || theme().radius_lg.max(px(16.0)))
+                    .rounded_t(move || theme().radius_lg().max(px(16.0)))
                     .bg(colors::SURFACE)
                     .shadow_lg()
                     .bind_translate_y(&offset)
@@ -127,7 +128,7 @@ pub(crate) fn Sheet(props: SheetProps, cx: Scope<SheetEvent>) -> impl IntoElemen
                             .h(px(5.0))
                             .self_center()
                             .rounded_full()
-                            .bg(move || theme().muted),
+                            .bg(move || theme().muted()),
                     )
                     .child(children),
             )

@@ -11,8 +11,9 @@
 //! would, in its order, and fails with what is on screen when it cannot
 //! be taken or when the app throws. An observer ([`Headless::observe`])
 //! sees every batch with the step it came in ([`print_batch`] prints it as
-//! `nsh test --trace` does). [`StubNetwork`] and [`MemoryStorage`] stand in for
-//! the device's network and storage.
+//! `nsh test --trace` does). [`StubNetwork`] and
+//! [`MemoryStorage`](crate::MemoryStorage) stand in for the device's
+//! network and storage.
 //!
 //! On a manual clock (`EngineConfig::clock`) the app's time moves only as
 //! the driver moves it: display frames come at once, one frame's time
@@ -27,9 +28,9 @@
 //! of an app's crate, which need no QuickJS for a Rust root.
 
 mod animation;
+#[cfg(feature = "live")]
+mod live;
 mod net;
-mod screen;
-mod selector;
 mod stub;
 
 use std::{
@@ -51,18 +52,16 @@ use nsh_engine::{
     AppError, AppErrorKind, Clock, Engine, EngineConfig, EngineControl, Environment, MountSink,
 };
 
-use self::{
-    animation::{Animator, FRAME},
-    screen::{Back, Pick},
-    selector::Selector,
-};
+use self::animation::{Animator, FRAME};
+#[cfg(feature = "live")]
+pub use self::live::UreqNetwork;
 pub use self::{
-    net::{DirectoryAssets, UreqNetwork},
-    screen::Screen,
-    stub::{
-        MemoryStorage, RecordingNetwork, StubHandler, StubNetwork, StubReply, StubResponse,
-        StubRoute,
-    },
+    net::DirectoryAssets,
+    stub::{RecordingNetwork, StubHandler, StubNetwork, StubReply, StubResponse, StubRoute},
+};
+use crate::{
+    screen::{Back, Pick, Screen},
+    selector::Selector,
 };
 
 /// How long [`Headless::wait_for`] and [`Headless::wait_until`] wait by
@@ -205,13 +204,15 @@ enum Pumped {
 /// it rendered nothing for 100 ms and no native animation runs (2 s at
 /// most), and fail when the app threw meanwhile (an exception that
 /// escaped a callback, a bundle that did not load, a VM that was stopped)
-/// or asked what only a real platform answers (an image's size).
+/// or asked what only a real platform answers (an image from the
+/// clipboard).
 ///
 /// It plays the platform's part the NSH protocol defines and nothing
-/// else: the native animation graph runs frame by frame (`nsh-animation`),
+/// else: the native animation graph runs frame by frame (nsh-core's `animation`),
 /// a back pops screens and closes modals, dialogs are answered (by the
 /// test, else [`default_answer`]), the clipboard holds text. Images are
-/// not loaded: no `onLoad` comes.
+/// not loaded: no `onLoad` comes, and `Image.getSize` / `Image.prefetch`
+/// fail.
 pub struct Headless {
     engine: Engine,
     batches: Receiver<MountBatch>,
@@ -504,6 +505,16 @@ impl Headless {
                 fields.push(("text", PayloadValue::Str(text)));
             }
             control.dispatch_event(ROOT_ID, EventKind::Clipboard, EventPayload::Map(fields));
+        }
+        for id in self.screen.take_image_infos() {
+            let fields = vec![
+                ("id", PayloadValue::Number(f64::from(id))),
+                (
+                    "error",
+                    PayloadValue::Str("headless runs load no images".into()),
+                ),
+            ];
+            control.dispatch_event(ROOT_ID, EventKind::ImageInfo, EventPayload::Map(fields));
         }
         if self.screen.take_back_asked() {
             self.go_back();
@@ -1176,30 +1187,7 @@ fn failure(error: AppError) -> Result<(), String> {
 /// Prints `batch`, which came in step `step`, as `nsh test --trace` does: a line
 /// naming the step and the number of items, then one line per item.
 pub fn print_batch(out: &mut dyn Write, step: &str, batch: &MountBatch) {
-    // A closed output (`| head`) ends nothing: the run goes on unseen.
-    let _ = writeln!(out, "── {step}: {} items", batch.items.len());
-    for item in &batch.items {
-        let _ = match item {
-            MountItem::Text {
-                id, text, content, ..
-            } => writeln!(
-                out,
-                "   Text {{ id: {id}, text: {:?}, content: {}x{} @ {},{} }}",
-                text.text,
-                content.size.width.0,
-                content.size.height.0,
-                content.origin.x.0,
-                content.origin.y.0
-            ),
-            MountItem::Frame { id, frame } => writeln!(
-                out,
-                "   Frame {{ id: {id}, x: {}, y: {}, w: {}, h: {} }}",
-                frame.origin.x.0, frame.origin.y.0, frame.size.width.0, frame.size.height.0
-            ),
-            other => writeln!(out, "   {other:?}"),
-        };
-    }
-    let _ = out.flush();
+    crate::trace::print_items(out, step, &crate::trace::item_lines(batch));
 }
 
 #[cfg(test)]

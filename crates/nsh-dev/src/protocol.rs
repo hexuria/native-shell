@@ -5,6 +5,11 @@
 //! frame with the payload and, if announced, one binary frame with the
 //! source map (JSON). A [`ServerMessage::Patch`] (a hot update) is framed the
 //! same way and precedes the bundle of the same version.
+//!
+//! `nsh test --target` drives a host's app through the same connection: the
+//! server's hello asks for a test session, and each [`ServerMessage::Step`]
+//! (a [`TestStep`] with an id) gets one [`ClientMessage::StepDone`] with
+//! that id, from the host's test agent (`nsh_testing::agent`).
 
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +46,36 @@ pub enum ClientMessage {
         /// does not say, which gets every bundle.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ui_sets: Option<Vec<String>>,
+        /// The host takes test steps ([`ServerMessage::Step`]).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        tests: bool,
+    },
+    /// The outcome of the [`ServerMessage::Step`] with this id.
+    StepDone {
+        /// The step's id.
+        id: u64,
+        /// What it gave, or why it failed.
+        outcome: StepOutcome,
+    },
+    /// A request of a test session's app, which the test answers
+    /// ([`ServerMessage::Fetch`] of the same id).
+    Fetch {
+        /// The request's id, chosen by the host.
+        id: u64,
+        /// The request.
+        request: WireRequest,
+    },
+    /// The app no longer wants the answer to request `id`.
+    FetchCancel {
+        /// The request's id.
+        id: u64,
+    },
+    /// A batch a traced test session's app applied
+    /// ([`ServerMessage::TestSetup`]): its mount items, a line each, as
+    /// `nsh test --trace` prints them.
+    Trace {
+        /// The items.
+        items: Vec<String>,
     },
     /// A log line from the host (JS console or native).
     Log {
@@ -93,7 +128,43 @@ pub enum ServerMessage {
         /// by it.
         #[serde(default)]
         session: u64,
+        /// A test session: the host keeps the model of its app that steps
+        /// need from the first bundle on ([`ServerMessage::Step`]).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        test: bool,
     },
+    /// What a test session's app starts with (after [`ServerMessage::Hello`],
+    /// before the first bundle): the storage it finds, in place of its
+    /// own. Its requests go to the test ([`ClientMessage::Fetch`]).
+    TestSetup {
+        /// The storage's entries.
+        #[serde(default)]
+        storage: Vec<(String, String)>,
+        /// Trace the app (`nsh test --trace`): its engine logs each
+        /// commit's timings, and the host sends each batch it applies
+        /// ([`ClientMessage::Trace`]).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        trace: bool,
+    },
+    /// What the test answers to the app's request `id`
+    /// ([`ClientMessage::Fetch`]), a message per event, in order.
+    Fetch {
+        /// The request's id.
+        id: u64,
+        /// The event.
+        reply: FetchReply,
+    },
+    /// A step of a test, which the host answers with a
+    /// [`ClientMessage::StepDone`] of the same id.
+    Step {
+        /// Its id.
+        id: u64,
+        /// What to do.
+        step: TestStep,
+    },
+    /// A test session's app is the host's own Rust root (`nsh.json`
+    /// `"root"`, an app of Rust only), which it runs in place of a bundle.
+    Root,
     /// A rebuild started.
     Building,
     /// The host cannot run the app: the latest bundle imports UI sets it
@@ -147,6 +218,308 @@ pub enum ServerMessage {
         /// defaults). `None`: none, as an app on its own has.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limits: Option<String>,
+    },
+}
+
+/// A step of a test on a host's app, named as `nsh/test` names them: views
+/// are found by selectors (`id:save`, `text:Add`, `role:button[Save]`), and
+/// actions are native input at the view the selector names.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "step", rename_all = "snake_case")]
+pub enum TestStep {
+    /// Waits for the app's first render, then until it is quiet.
+    Ready {
+        /// How long to wait for the first render, in milliseconds.
+        timeout_ms: u64,
+    },
+    /// Presses the view (`app.press`).
+    Press {
+        /// The view.
+        selector: String,
+    },
+    /// Holds a press on the view for its long press delay (`app.longPress`).
+    LongPress {
+        /// The view.
+        selector: String,
+    },
+    /// Types `text` into the input (`app.type`).
+    Type {
+        /// The input.
+        selector: String,
+        /// What to type; `\n` is the return key in a single-line input.
+        text: String,
+    },
+    /// The return key in the input (`app.submit`).
+    Submit {
+        /// The input.
+        selector: String,
+    },
+    /// Empties the input (`app.clear`).
+    Clear {
+        /// The input.
+        selector: String,
+    },
+    /// Scrolls the scroll view by `distance` points along its axis
+    /// (`app.scroll`).
+    Scroll {
+        /// The scroll view.
+        selector: String,
+        /// Points; negative scrolls back.
+        distance: f32,
+    },
+    /// Goes back as the user does (`app.back`).
+    Back,
+    /// Lets the app run (`app.wait`).
+    Wait {
+        /// Milliseconds.
+        ms: u64,
+    },
+    /// Waits until a view matches, or none does (`app.waitFor`).
+    WaitFor {
+        /// The view.
+        selector: String,
+        /// Milliseconds at most.
+        timeout_ms: u64,
+        /// Until none matches.
+        gone: bool,
+    },
+    /// Waits for the next batch, `timeout_ms` at most: what polling a
+    /// condition waits for between looks (`app.waitUntil`).
+    NextChange {
+        /// Milliseconds at most.
+        timeout_ms: u64,
+    },
+    /// The texts on screen, in order: a list of strings.
+    Texts,
+    /// How many views match: a number.
+    Count {
+        /// The selector.
+        selector: String,
+    },
+    /// Whether a view matches: a boolean.
+    Shows {
+        /// The selector.
+        selector: String,
+    },
+    /// Whether the view takes input: a boolean.
+    Enabled {
+        /// The selector.
+        selector: String,
+    },
+    /// The text of the input: a string, or null when none matches.
+    Value {
+        /// The selector.
+        selector: String,
+    },
+    /// The dialogs the app showed, in order (`app.dialogs`): a list of
+    /// `nsh_core::Dialog`s.
+    Dialogs,
+    /// The oldest dialog not answered yet: an `nsh_core::Dialog`, or null.
+    PendingDialog,
+    /// Answers the oldest dialog not answered yet: presses its button
+    /// `button`, or closes it without one.
+    AnswerDialog {
+        /// The button's text (`None`: close it without one).
+        button: Option<String>,
+    },
+    /// A picture of the app's window: a PNG, base64-encoded (the test's
+    /// side saves it: the host may run on another machine).
+    Screenshot,
+    /// Makes the window `width` × `height` points (`app.setViewport`).
+    SetViewport {
+        /// Points.
+        width: f32,
+        /// Points.
+        height: f32,
+    },
+    /// Switches the system's appearance as the app sees it
+    /// (`app.setColorScheme`).
+    SetColorScheme {
+        /// Dark rather than light.
+        dark: bool,
+    },
+    /// Closes the app: the host exits.
+    Quit,
+    /// A question about the host's model of the app or about its views,
+    /// from a test agent that runs elsewhere (the web: `nsh` acts through
+    /// the browser, the page knows the app).
+    Scene {
+        /// The question.
+        query: SceneQuery,
+    },
+}
+
+/// What a test agent that runs outside the host asks of it
+/// ([`TestStep::Scene`]); the answers' shapes are `nsh_testing::agent`'s.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "query", rename_all = "snake_case")]
+pub enum SceneQuery {
+    /// How many batches the app applied and how long ago the last was.
+    Activity,
+    /// The app's errors since the last time, taken.
+    TakeErrors,
+    /// The one view `selector` names for a step on `target`.
+    Pick {
+        /// The selector.
+        selector: String,
+        /// What the step acts on.
+        target: PickTarget,
+    },
+    /// The scroll views around view `id`, innermost first.
+    ScrollAncestors {
+        /// The view.
+        id: u32,
+    },
+    /// View `id`'s long press delay in milliseconds, if it says.
+    LongPressDelay {
+        /// The view.
+        id: u32,
+    },
+    /// Whether scroll view `id` scrolls horizontally.
+    Horizontal {
+        /// The view.
+        id: u32,
+    },
+    /// The input `selector` names.
+    InputId {
+        /// The selector.
+        selector: String,
+    },
+    /// The oldest dialog was answered.
+    Answered,
+    /// The app's storage: its entries.
+    Storage,
+    /// View `id`'s bounds on screen, in points from the viewport's top left.
+    Bounds {
+        /// The view.
+        id: u32,
+    },
+    /// The viewport's size in points.
+    Viewport,
+    /// The text input `id` holds.
+    InputText {
+        /// The view.
+        id: u32,
+    },
+    /// Whether a native animation runs.
+    Animating,
+    /// Where to press to answer the dialog shown: its button `button`, or
+    /// outside it (`None`).
+    DialogPoint {
+        /// The button's text.
+        button: Option<String>,
+    },
+}
+
+/// An app's HTTP request, as a test session's host forwards it
+/// ([`ClientMessage::Fetch`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WireRequest {
+    /// Upper-case method.
+    pub method: String,
+    /// Absolute URL.
+    pub url: String,
+    /// Header names and values, in order.
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    /// The body (a streamed one, gathered).
+    #[serde(default, with = "base64_bytes")]
+    pub body: Vec<u8>,
+    /// Follow redirects.
+    #[serde(default)]
+    pub follow_redirects: bool,
+}
+
+/// What a test answers to an app's request ([`ServerMessage::Fetch`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "reply", rename_all = "snake_case")]
+pub enum FetchReply {
+    /// The host makes the request itself, on its own network (the test
+    /// lets requests through).
+    Pass,
+    /// The response's status and headers.
+    Head {
+        /// The status code.
+        status: u16,
+        /// Header names and values.
+        headers: Vec<(String, String)>,
+        /// The response's URL.
+        url: String,
+    },
+    /// Bytes of the body, in order.
+    Data {
+        /// The bytes.
+        #[serde(with = "base64_bytes")]
+        bytes: Vec<u8>,
+    },
+    /// The body is complete.
+    End,
+    /// The request failed.
+    Failed {
+        /// Why.
+        message: String,
+    },
+}
+
+/// What answers the requests of a test session's app (the test's routes):
+/// `DevServer::set_test_network`.
+pub trait TestNetwork: Send + Sync {
+    /// Answers `request` through `reply`, an event at a time in order, from
+    /// any thread ([`FetchReply::Pass`]: the host makes it itself). The
+    /// function returned cancels it.
+    fn fetch(
+        &self,
+        request: WireRequest,
+        reply: Box<dyn FnMut(FetchReply) + Send>,
+    ) -> Box<dyn FnOnce() + Send>;
+}
+
+/// Bytes as base64 text in JSON.
+mod base64_bytes {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let text = String::deserialize(d)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// What a step acts on, which decides the view a selector names
+/// ([`SceneQuery::Pick`]).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PickTarget {
+    /// A press: the view, or the nearest around it that hears presses.
+    Pressable,
+    /// A long press.
+    LongPressable,
+    /// An input.
+    Input,
+    /// A scroll view.
+    ScrollView,
+}
+
+/// How a [`TestStep`] ended.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum StepOutcome {
+    /// It was taken; `value` is what a query gives (`null` for actions).
+    Done {
+        /// The value.
+        #[serde(default)]
+        value: serde_json::Value,
+    },
+    /// It could not be taken, or the app threw meanwhile.
+    Failed {
+        /// Why, with what is on screen.
+        message: String,
     },
 }
 

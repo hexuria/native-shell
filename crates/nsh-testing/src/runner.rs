@@ -227,6 +227,9 @@ pub fn runner(ui_sets: Vec<Registry>, root: Option<fn() -> Root>) -> ExitCode {
         trace: request
             .trace
             .then(|| Arc::new(Mutex::new(Box::new(std::io::stdout()) as _))),
+        // On a real platform, `nsh` runs the test files itself: the apps run
+        // in hosts built with the app's crates.
+        host: None,
     };
     for file in &request.files {
         let mut report = |result: &TestResult| {

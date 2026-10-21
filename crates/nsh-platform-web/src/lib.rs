@@ -64,6 +64,14 @@ thread_local! {
     /// The bytes of the asset JS hands over in `read_asset`.
     pub(crate) static ASSET: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
     static FRAME_REQUESTED: Cell<bool> = const { Cell::new(false) };
+    /// A test session's model of the app (`nsh test --target web`,
+    /// [`nsh_test_start`]): every batch and error goes to it.
+    #[cfg(feature = "dev")]
+    static TEST_MODEL: RefCell<Option<std::sync::Arc<nsh_testing::agent::Model>>> =
+        const { RefCell::new(None) };
+    /// The last answer of [`nsh_test_answer`] (JSON).
+    #[cfg(feature = "dev")]
+    static TEST_ANSWER: RefCell<String> = const { RefCell::new(String::new()) };
     /// The page's URL, which relative request URLs resolve against.
     static BASE_URL: RefCell<Option<String>> = const { RefCell::new(None) };
     /// How the next [`nsh_start`] runs its bundle ([`nsh_bundle_options`]).
@@ -184,10 +192,22 @@ struct Sink;
 
 impl MountSink for Sink {
     fn submit(&self, batch: MountBatch) {
+        #[cfg(feature = "dev")]
+        TEST_MODEL.with(|m| {
+            if let Some(model) = &*m.borrow() {
+                model.apply(&batch);
+            }
+        });
         BATCHES.with(|b| b.borrow_mut().push(batch));
     }
 
     fn report_error(&self, message: &str) {
+        #[cfg(feature = "dev")]
+        TEST_MODEL.with(|m| {
+            if let Some(model) = &*m.borrow() {
+                model.error(message);
+            }
+        });
         ffi::report_error(message);
     }
 
@@ -508,7 +528,8 @@ fn run(app: App, width: f32, height: f32, environment: Environment, limits: Limi
     let namespace = BASE_URL.with(|b| {
         nsh_engine::local_storage_prefix(app.app_id(), b.borrow().as_deref().unwrap_or(""))
     });
-    let config = EngineConfig {
+    #[allow(unused_mut)]
+    let mut config = EngineConfig {
         app,
         viewport: Size::new(Points(width), Points(height)),
         trace: false,
@@ -528,6 +549,13 @@ fn run(app: App, width: f32, height: f32, environment: Environment, limits: Limi
         storage: Some(std::sync::Arc::new(storage)),
         clock: Default::default(),
     };
+    // A test session's app: the test's storage, network and trace.
+    #[cfg(feature = "dev")]
+    TEST_MODEL.with(|m| {
+        if let Some(model) = &*m.borrow() {
+            model.set_up_engine(&mut config);
+        }
+    });
     let text = Rc::new(WebTextEngine::default());
     let Some(engine) = LocalEngine::start(config, text.clone(), Sink) else {
         return -1.0;
@@ -752,6 +780,118 @@ pub extern "C" fn nsh_compiled_ptr() -> *const u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn nsh_compiled_len() -> usize {
     COMPILED.with(|c| c.borrow().len())
+}
+
+/// The server runs a test session (`nsh test --target web`): the app's
+/// model is kept from the next bundle on, for [`nsh_test_answer`].
+#[cfg(feature = "dev")]
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_test_start() {
+    TEST_MODEL.with(|m| {
+        m.borrow_mut()
+            .get_or_insert_with(|| std::sync::Arc::new(nsh_testing::agent::Model::default()));
+    });
+}
+
+/// Answers a test step (JSON `nsh_dev::protocol::TestStep`, `len` bytes at
+/// `ptr`) from the app's model: the answer's length in bytes, its JSON at
+/// [`nsh_test_answer_ptr`]: `{"done": value}`, `{"failed": message}`, or
+/// `{"page": true}` when the page's views answer it (where a view is, the
+/// viewport, an input's text, a dialog's buttons).
+///
+/// # Safety
+///
+/// `ptr` points at `len` bytes from [`nsh_alloc`].
+#[cfg(feature = "dev")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_test_answer(ptr: *const u8, len: usize) -> usize {
+    // SAFETY: per the contract.
+    let text = unsafe { string(ptr, len) };
+    let answer = match serde_json::from_str::<nsh_dev::protocol::TestStep>(&text) {
+        Err(e) => serde_json::json!({ "failed": format!("not a step: {e}") }),
+        Ok(nsh_dev::protocol::TestStep::Scene {
+            query: nsh_dev::protocol::SceneQuery::Animating,
+        }) => {
+            let animating =
+                APP.with(|a| a.borrow().as_ref().is_some_and(|r| r.animation.animating()));
+            serde_json::json!({ "done": animating })
+        }
+        Ok(step) => {
+            let model = TEST_MODEL.with(|m| m.borrow().clone());
+            match model.and_then(|m| nsh_testing::agent::answer(&m, &step)) {
+                Some(Ok(value)) => serde_json::json!({ "done": value }),
+                Some(Err(message)) => serde_json::json!({ "failed": message }),
+                None => serde_json::json!({ "page": true }),
+            }
+        }
+    };
+    TEST_ANSWER.with(|a| {
+        let mut a = a.borrow_mut();
+        *a = answer.to_string();
+        a.len()
+    })
+}
+
+/// What the test sets the app up with (JSON `{"storage": [[key, value], …],
+/// "trace": bool}`, a `nsh_dev::protocol::ServerMessage::TestSetup`'s
+/// fields, `len` bytes at `ptr`): the storage it starts with, and whether
+/// it traces the app; its requests, and a traced app's batches, go to the
+/// test over the page's socket from then on.
+///
+/// # Safety
+///
+/// `ptr` points at `len` bytes from [`nsh_alloc`].
+#[cfg(feature = "dev")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_test_setup(ptr: *const u8, len: usize) {
+    // SAFETY: per the contract.
+    let text = unsafe { string(ptr, len) };
+    let mut setup: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    let storage: Vec<(String, String)> =
+        serde_json::from_value(setup["storage"].take()).unwrap_or_default();
+    let trace = setup["trace"].as_bool().unwrap_or(false);
+    let model = TEST_MODEL.with(|m| m.borrow().clone());
+    if let Some(model) = model {
+        model.set_up(
+            storage,
+            trace,
+            std::sync::Arc::new(|message: nsh_testing::agent::Outgoing| {
+                if let Ok(json) = serde_json::to_string(&message.into_message()) {
+                    ffi::test_send(&json);
+                }
+            }),
+        );
+    }
+}
+
+/// The test's answer to the app's request (JSON `{"id": n, "reply": …}`,
+/// a `nsh_dev::protocol::ServerMessage::Fetch`'s fields, `len` bytes at
+/// `ptr`).
+///
+/// # Safety
+///
+/// `ptr` points at `len` bytes from [`nsh_alloc`].
+#[cfg(feature = "dev")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn nsh_test_fetch_reply(ptr: *const u8, len: usize) {
+    // SAFETY: per the contract.
+    let text = unsafe { string(ptr, len) };
+    let Ok(mut wire) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    let id = wire["id"].as_u64();
+    let reply = serde_json::from_value::<nsh_dev::protocol::FetchReply>(wire["reply"].take());
+    let model = TEST_MODEL.with(|m| m.borrow().clone());
+    if let (Some(model), Some(id), Ok(reply)) = (model, id, reply) {
+        model.fetch_reply(id, reply);
+    }
+}
+
+/// Where the text of the last [`nsh_test_answer`] starts.
+#[cfg(feature = "dev")]
+#[unsafe(no_mangle)]
+pub extern "C" fn nsh_test_answer_ptr() -> *const u8 {
+    TEST_ANSWER.with(|a| a.borrow().as_ptr())
 }
 
 /// Stops the app.
@@ -983,6 +1123,7 @@ pub unsafe extern "C" fn nsh_event(
                             "bottom" => "bottom",
                             "left" => "left",
                             "text" => "text",
+                            "composing" => "composing",
                             "has" => "has",
                             "uri" => "uri",
                             "files" => "files",

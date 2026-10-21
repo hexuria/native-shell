@@ -35,8 +35,8 @@ use super::{
 ///     view()
 ///         .px_4()
 ///         .py_3()
-///         .bg(move || theme().primary)
-///         .on_press(move |_: &()| cx.emit(ButtonEvent::Press))
+///         .bg(move || theme().primary()) // nsh-base's theme
+///         .on_press(move || cx.emit(ButtonEvent::Press))
 ///         .child(text(props.title))
 /// }
 /// ```
@@ -60,7 +60,10 @@ pub trait Component: 'static {
     /// makes (signals, effects, timers) goes with the component.
     fn view(props: Self::Props, cx: super::Scope<Self::Event>) -> impl IntoElement;
 
-    /// This component inside another one's view.
+    /// This component inside another one's view, given all its props.
+    /// A `#[component]` has a constructor of its own, which Rust views use
+    /// (`button().disabled(..)`); this stays for components implemented
+    /// by hand and for code generic over components.
     fn element(props: Self::Props) -> ComponentElement<Self>
     where
         Self: Sized,
@@ -207,6 +210,10 @@ pub enum PropKind {
     /// A value: decoded in the JS call ([`PropSpec::decode`]), set by the
     /// core.
     Value,
+    /// A render function (`Option<Renderer<T>>`): decoded in the JS call
+    /// as a value is (a function, or none), its content rendered by JS
+    /// when the core asks for it ([`super::JsEvent::Render`]).
+    Renderer,
     /// A named slot: JSX in a holder node.
     Slot,
     /// The JSX children.
@@ -320,7 +327,12 @@ impl Props for () {
     }
 }
 
-/// A component's events. Derive it: `#[derive(Event)]`.
+/// A component's events. Derive it: `#[derive(Event)]`. The element of a
+/// `#[component]` emitting them gets a listener method per event, named
+/// as its TSX handler in snake case (`onPress` is `.on_press(..)`): a
+/// unit variant's takes `move || ..`, a one-field variant's the value
+/// (`move |index: &u32| ..`), a named-field variant's the event itself
+/// ([`ComponentBuilder`](super::ComponentBuilder)).
 pub trait Event: 'static {
     /// The events (their named types declared in `types`).
     fn spec(types: &mut TsTypes) -> Vec<EventSpec>;
@@ -402,6 +414,14 @@ impl ComponentSpec {
             .map(|p| p.name)
     }
 
+    /// Its render functions ([`PropKind::Renderer`]).
+    pub fn renderers(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.props
+            .iter()
+            .filter(|p| p.kind == PropKind::Renderer)
+            .map(|p| p.name)
+    }
+
     /// Whether it takes JSX children.
     pub fn takes_children(&self) -> bool {
         self.props.iter().any(|p| p.kind == PropKind::Children)
@@ -473,7 +493,7 @@ pub(crate) trait AnyInstance {
 #[derive(Clone)]
 pub struct Root {
     make: Arc<dyn Fn() -> super::AnyElement + Send + Sync>,
-    theme: Option<Arc<super::Theme>>,
+    tokens: Option<Arc<super::Tokens>>,
     fonts: Vec<Arc<[u8]>>,
     appearance: Option<crate::platform::Appearance>,
     app_id: Option<String>,
@@ -485,7 +505,7 @@ impl Root {
     pub fn new<C: Component>(props: impl Fn() -> C::Props + Send + Sync + 'static) -> Self {
         Self {
             make: Arc::new(move || super::IntoElement::into_element(C::element(props()))),
-            theme: None,
+            tokens: None,
             fonts: Vec::new(),
             appearance: None,
             app_id: None,
@@ -505,9 +525,10 @@ impl Root {
         self.app_id.as_deref()
     }
 
-    /// Renders with `theme` (by default the default one).
-    pub fn theme(mut self, theme: super::Theme) -> Self {
-        self.theme = Some(Arc::new(theme));
+    /// Renders with design tokens `tokens` (`nsh-base`'s theme's; by
+    /// default the UI sets' defaults).
+    pub fn tokens(mut self, tokens: super::Tokens) -> Self {
+        self.tokens = Some(Arc::new(tokens));
         self
     }
 
@@ -544,9 +565,9 @@ impl Root {
         self.appearance
     }
 
-    /// The theme it renders with.
-    pub fn theme_ref(&self) -> Option<&super::Theme> {
-        self.theme.as_deref()
+    /// The design tokens it renders with.
+    pub fn tokens_ref(&self) -> Option<&super::Tokens> {
+        self.tokens.as_deref()
     }
 
     /// The font files to register.
@@ -622,6 +643,8 @@ pub struct Registry {
     ui_set: Option<&'static str>,
     /// The files its crates ship ([`Registry::assets`]).
     assets: Arc<Vec<&'static [super::AssetFile]>>,
+    /// Makes the design tokens of a theme ([`Registry::tokens_from`]).
+    tokens: Option<super::TokenSource>,
 }
 
 impl fmt::Debug for Registry {
@@ -809,6 +832,7 @@ impl Registry {
     pub fn merged(sets: &[Registry]) -> Self {
         let mut out = Self::default();
         for set in sets {
+            out.tokens = out.tokens.or(set.tokens);
             let types = Arc::make_mut(&mut out.types);
             for (name, ty) in set.types.iter() {
                 if let Some(old) = types.insert(name, ty.clone()) {
@@ -855,6 +879,20 @@ impl Registry {
     pub fn assets(&mut self, files: &'static [super::AssetFile]) -> &mut Self {
         Arc::make_mut(&mut self.assets).push(files);
         self
+    }
+
+    /// Makes the design tokens of the app's theme file, and the defaults
+    /// (`nsh-base`'s theme): the core reads `nsh.json`'s `"theme"` with it.
+    pub fn tokens_from(&mut self, source: super::TokenSource) -> &mut Self {
+        self.tokens = Some(source);
+        self
+    }
+
+    /// The tokens of theme file `json` (`None`: the defaults), by the
+    /// source a set brings ([`Registry::tokens_from`]; `None`: no set
+    /// does).
+    pub fn tokens(&self, json: Option<&str>) -> Option<Result<super::Tokens, String>> {
+        self.tokens.map(|source| source(json))
     }
 
     /// The files [`Registry::assets`] ships.

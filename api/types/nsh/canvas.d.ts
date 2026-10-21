@@ -28,7 +28,7 @@ export interface CanvasProps extends ViewProps {
    * canvas resizes (it first runs once the size is known); animated values
    * passed as numbers or colors animate without running it.
    */
-  draw: (ctx: CanvasRenderingContext2D, size: CanvasSize) => void;
+  draw: (cx: CanvasRenderingContext2D, size: CanvasSize) => void;
 }
 
 /** A number in a drawing: a constant, or an animated value the canvas reads
@@ -124,6 +124,8 @@ export interface CanvasProperties {
  * A view drawn with a 2D context (HTML Canvas 2D API). `draw` records the
  * drawing in one go; the platform replays it natively (CGContext, Android
  * Canvas), at the screen's resolution.
+ *
+ * @deprecated Import from "nsh".
  */
 export declare function Canvas(props: CanvasProps): YNode;
 

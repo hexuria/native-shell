@@ -183,8 +183,25 @@ pub(crate) fn start(view: &Rc<AppView>, url: String) {
             .iter()
             .filter_map(|set| set.specifier().map(str::to_owned))
             .collect(),
+        tests: true,
     };
+    // A test session (`nsh test --target macos`): the surface keeps the
+    // model the agent's steps see, from the first bundle on.
+    let key_of_surface = surface.key();
+    let tester = nsh_testing::agent::Tester::new(move |model| {
+        DispatchQueue::main().exec_async(move || {
+            if let Some(surface) = crate::surface::Surface::with_key(key_of_surface) {
+                surface.set_test_model(Some(model));
+            }
+        });
+        Box::new(crate::agent::MacNative::new(key_of_surface))
+    });
+    let tests = tester.clone();
     let started = DevClient::start(url, host, move |event| {
+        // Taken off the main queue: a step waits for what it does there.
+        let Some(event) = tests.event(event) else {
+            return;
+        };
         match event {
             DevEvent::Connected => CONNECTED.store(true, Ordering::Relaxed),
             DevEvent::Disconnected => CONNECTED.store(false, Ordering::Relaxed),
@@ -200,6 +217,7 @@ pub(crate) fn start(view: &Rc<AppView>, url: String) {
     match started {
         Ok(client) => {
             let client = Arc::new(client);
+            tester.set_client(&client);
             *CLIENT.lock().unwrap_or_else(|e| e.into_inner()) = Arc::downgrade(&client);
             *view.dev.borrow_mut() = Some(DevSession {
                 key,
@@ -291,6 +309,31 @@ fn handle(ui: &Rc<RefCell<DevUi>>, event: DevEvent) {
     match event {
         DevEvent::Connected => hide_status(ui),
         DevEvent::Disconnected => show_status(ui, "Dev server disconnected — reconnecting…"),
+        // The client's thread hands them to the test agent.
+        DevEvent::Testing
+        | DevEvent::Step { .. }
+        | DevEvent::TestSetup { .. }
+        | DevEvent::Fetch { .. } => {}
+        DevEvent::Root => {
+            hide_status(ui);
+            let Some(root) = crate::app::root() else {
+                return show_error(
+                    ui,
+                    "This host cannot run the app",
+                    "The app is of Rust only, and this host was not built with its root.",
+                    true,
+                );
+            };
+            let view = {
+                let mut ui = ui.borrow_mut();
+                ui.latest = None;
+                ui.running = None;
+                ui.view.upgrade()
+            };
+            let Some(view) = view else { return };
+            hide_error(ui);
+            view.load(App::Rust(root));
+        }
         DevEvent::Building => show_status(ui, "Building…"),
         DevEvent::BuildFailed(message) => {
             hide_status(ui);

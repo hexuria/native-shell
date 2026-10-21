@@ -9,6 +9,7 @@
 //! on the engine thread, between the JS host and the platform backend.
 
 pub mod access;
+pub mod animation;
 pub mod canvas;
 pub mod color;
 mod core;
@@ -20,29 +21,36 @@ mod fenwick;
 pub mod filesystem;
 pub mod geometry;
 mod grid;
+pub mod input;
 pub mod js;
 pub mod keymap;
 mod mount;
+pub mod navigation;
 mod ops;
 pub mod platform;
 mod props;
 pub mod reactive;
 pub mod resource;
 pub mod runtime;
+pub mod scroll;
+pub mod selection;
 pub mod shape;
 pub mod storage;
 mod style;
+#[cfg(feature = "svg")]
+pub mod svg;
 pub mod tailwind;
 mod text;
+pub mod text_edit;
 pub mod time;
 mod transform;
+pub mod transition;
 pub mod ui;
 pub mod websocket;
 
 // The derive macros name `::nsh_core`, also in this crate's own tests.
 extern crate self as nsh_core;
 
-pub use nsh_animation;
 /// The values registered native components take and emit (props, events,
 /// command arguments): JSON.
 pub use serde_json::Value as JsonValue;

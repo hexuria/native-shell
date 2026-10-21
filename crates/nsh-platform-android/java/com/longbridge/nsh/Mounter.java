@@ -128,10 +128,27 @@ final class Mounter {
     final java.util.ArrayList<TouchTracker> touchTrackers = new java.util.ArrayList<>();
     /** The text with a selection (one at a time, as in TextView). */
     TextBox selectedText;
+    /** The selection area with a selection (one per surface, a text's or an area's). */
+    SelectionArea selectedArea;
+    /** Selection areas (`ViewProps.selection_area`), by view. */
+    private final SparseArray<SelectionArea> selectionAreas = new SparseArray<>();
 
     /** A finger went down at the screen point: a selection elsewhere ends. */
     void touchDown(float rawX, float rawY) {
         if (selectedText != null && !selectedText.selectionContains(rawX, rawY)) selectedText.clearSelection();
+        if (selectedArea != null && !selectedArea.selectionContains(rawX, rawY)) selectedArea.clear();
+    }
+
+    /** The outermost selection area {@code text} is in (an area inside another is part of it), or null. */
+    SelectionArea selectionAreaOf(TextBox text) {
+        if (selectionAreas.size() == 0) return null;
+        SelectionArea outer = null;
+        for (Object v = text; v instanceof View; v = ((View) v).getParent()) {
+            if (!(v instanceof Node)) continue;
+            SelectionArea area = selectionAreas.get(((Node) v).nodeId());
+            if (area != null && area.view == v) outer = area;
+        }
+        return outer;
     }
     /** Scroll views a JS responder keeps from scrolling. */
     private final java.util.ArrayList<ScrollBox> blockedScrolls = new java.util.ArrayList<>();
@@ -222,11 +239,12 @@ final class Mounter {
                         linkData[i * 3 + 2] = b.getInt();
                         linkEvents[i] = (b.getInt() & 0xffffffffL) | ((long) b.getInt() << 32);
                     }
-                    boolean selectable = b.getInt() != 0;
+                    // `selectable`: 1 asked for, 0 refused, 2 unset (`encode.rs`).
+                    int selectable = b.getInt();
                     Integer selectionColor = optColor(b);
                     if (v instanceof TextBox) {
                         TextBox t = (TextBox) v;
-                        t.setSelectable(selectable, selectionColor);
+                        t.setSelectable(selectable == 1, selectable == 0, selectionColor);
                         t.setLayout((Layout) layout, x * density, y * density, w * density, h * density);
                         t.setLinks(linkData, linkEvents);
                         if (links > 0 && t.press == null) t.press = new Pressable(t, this, t.id);
@@ -683,6 +701,11 @@ final class Mounter {
         }
         View v = views.get(id);
         if (v instanceof StackBox) stacks.remove(v);
+        SelectionArea area = selectionAreas.get(id);
+        if (area != null) {
+            area.clear();
+            selectionAreas.remove(id);
+        }
         screenOptions.remove(id);
         Animator running = layoutAnimators.get(id);
         if (running != null) running.cancel();
@@ -1282,7 +1305,16 @@ final class Mounter {
         } else {
             panActivations.remove(id);
         }
+        boolean selectionArea = b.getInt() != 0;
         if (v == null) return;
+        SelectionArea area = selectionAreas.get(id);
+        if (selectionArea && (area == null || area.view != v)) {
+            if (area != null) area.clear();
+            selectionAreas.put(id, new SelectionArea(this, v));
+        } else if (!selectionArea && area != null) {
+            area.clear();
+            selectionAreas.remove(id);
+        }
         Feedback f = feedback.get(id);
         if (f == null) feedback.put(id, f = new Feedback());
         f.longPressDelay = longPressDelay >= 0 ? Math.round(longPressDelay) : -1;
@@ -1309,21 +1341,26 @@ final class Mounter {
     }
 
     /** Applies `[animating, (view, prop, value)*]` from the animator. */
-    /** A canvas's drawing; loads the images it draws. */
+    /** A canvas's drawing; loads the images it draws (bitmaps: an SVG is an image that failed to load). */
     private void drawing(CanvasBox canvas, int[] code, Object[] objects) {
         for (String uri : canvas.setDrawing(code, objects)) {
             if (canvas.images.containsKey(uri)) continue;
             // At their natural size: the drawing may scale them anyway.
             Images.Image cached = images.request(uri, 0, 0, (image, error) -> {
-                if (image != null) {
+                if (image != null && !image.vector) {
                     canvas.images.put(uri, image);
                     canvas.invalidate();
                 } else {
-                    android.util.Log.w("nsh", "canvas image failed: " + error);
+                    android.util.Log.w("nsh", "canvas image failed: " + (image != null ? notABitmap(uri) : error));
                 }
             });
-            if (cached != null) canvas.images.put(uri, cached);
+            if (cached != null && cached.vector) android.util.Log.w("nsh", "canvas image failed: " + notABitmap(uri));
+            else if (cached != null) canvas.images.put(uri, cached);
         }
+    }
+
+    private static String notABitmap(String uri) {
+        return uri + " is an SVG image: canvases draw bitmaps (PNG, JPEG, ...)";
     }
 
     /** Canvas animated value slot `n` arrives as property `CANVAS_ARG + n` (`animation.rs`). */
@@ -1649,7 +1686,7 @@ final class Mounter {
             Images.Image cached = images.request(image.uri, maxPx, image.blurPx, image.callback);
             if (cached != null) {
                 image.requestedPx = 0;
-                image.setImage(cached.content, 0);
+                image.setImage(cached, 0);
                 image.imageShown = true;
                 loaded(image, cached);
             } else if (wants(image.id, Native.LOAD_START)) {
@@ -1662,7 +1699,7 @@ final class Mounter {
             Images.Image cached = images.request(image.placeholderUri, maxPx, 0, image.placeholderCallback);
             if (cached != null) {
                 image.placeholderPx = 0;
-                image.setImage(cached.content, 0);
+                image.setImage(cached, 0);
             }
         }
     }
@@ -1682,7 +1719,7 @@ final class Mounter {
         if (views.get(id) != image) return;
         if (result != null) {
             // React Native fades in images on Android (300 ms by default).
-            image.setImage(result.content, image.fadeMs < 0 ? 300 : image.fadeMs);
+            image.setImage(result, image.fadeMs < 0 ? 300 : image.fadeMs);
             image.imageShown = true;
             loaded(image, result);
         } else {
@@ -1695,10 +1732,10 @@ final class Mounter {
     private void placeholderDone(ImageBox image, Images.Image result) {
         image.placeholderPx = 0;
         if (views.get(image.id) != image || image.imageShown || result == null) return;
-        image.setImage(result.content, 0);
+        image.setImage(result, 0);
     }
 
-    /** `onLoad` reports the source's size in pixels, as on iOS. */
+    /** `onLoad` reports the source's size in pixels (an SVG's: in points), as on iOS. */
     private void loaded(ImageBox image, Images.Image result) {
         if (wants(image.id, Native.LOAD)) event(image.id, Native.LOAD, null, 0, result.width, result.height);
         if (wants(image.id, Native.LOAD_END)) event(image.id, Native.LOAD_END);

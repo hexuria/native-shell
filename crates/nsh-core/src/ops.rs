@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use nsh_animation::AnimationOp;
-
 use crate::{
+    animation::AnimationOp,
     geometry::{Bounds, DevicePixels, Percentage, Point, Points, Size},
     js::host::HostProps,
     props::{AccessibilityProp, EdgeInsets, LayoutAnimation, PointerEvents},
@@ -209,6 +208,7 @@ events! {
     FileDrop = "onFileDrop": "Local files were dropped (payload: [`EventPayload::FileDrop`]).",
     HoverMove = "onHoverMove": "The mouse moved over a hovered view, with no button down (payload: [`EventPayload::Hover`]; at most one per frame).",
     ContextMenu = "onContextMenu": "The secondary button was pressed over the view (payload: [`EventPayload::ContextMenu`]): the nearest listener around the view under the pointer hears it, unless a text input or selectable text is nearer.",
+    CompositionChange = "onCompositionChange": "An input method's composition in an input started, changed or ended (payload: `composing`, `text`: the text being composed, empty once it ends; after the `onChangeText` of the committed text).",
 }
 
 /// What an input holds, for the system's autofill and suggestions
@@ -1135,6 +1135,13 @@ pub struct StatusBarSetting {
     pub animated: Option<bool>,
 }
 
+/// The setting of the content's color alone (`.status_bar(StatusBarStyle::Light)`).
+impl From<StatusBarStyle> for StatusBarSetting {
+    fn from(style: StatusBarStyle) -> Self {
+        Self::default().foreground(style)
+    }
+}
+
 impl StatusBarSetting {
     /// Sets the content's color.
     pub const fn foreground(mut self, style: StatusBarStyle) -> Self {
@@ -1199,7 +1206,8 @@ impl StatusBarSetting {
 }
 
 /// How a dialog button looks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DialogButtonStyle {
     /// A regular button.
     #[default]
@@ -1211,7 +1219,7 @@ pub enum DialogButtonStyle {
 }
 
 /// A dialog button.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DialogButton {
     /// Label.
     pub text: String,
@@ -1220,7 +1228,7 @@ pub struct DialogButton {
 }
 
 /// An alert, or with `sheet` an action sheet.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Dialog {
     /// Echoed in the answer.
     pub id: u32,
@@ -1247,6 +1255,11 @@ pub enum Prop {
     /// for slot `name` (created by the generated glue).
     #[prop(js = "componentSlot", internal)]
     ComponentSlot(Arc<str>),
+    /// `componentRender`: this view holds what the app's function of a
+    /// Rust component's render prop rendered for a key (the prop, U+001F,
+    /// the key; made by the generated glue on `JsEvent::Render`).
+    #[prop(js = "componentRender", internal)]
+    ComponentRender(Arc<str>),
     /// A property of a registered native component (`$name` from JS):
     /// any JSON value, `None` to remove it.
     ComponentProp(Arc<str>, Option<crate::JsonValue>),
@@ -1325,10 +1338,13 @@ pub enum Prop {
     /// `scrollValue`: an animated value fed with the scroll offset (main axis), for
     /// scroll-linked effects.
     #[prop(js = "scrollValue", with = crate::js::host_values::scroll_value, reset = Prop::ScrollValue(None), ts = "AnimatedValue", on = SCROLL | LIST)]
-    ScrollValue(Option<nsh_animation::NodeId>),
+    ScrollValue(Option<crate::animation::NodeId>),
     /// `pan`: drags drive these animated values (points) on the UI thread.
     #[prop(js = "pan", with = crate::js::host_values::pan, reset = Prop::PanValues(None, None), ts = "{ x?: AnimatedValue; y?: AnimatedValue }")]
-    PanValues(Option<nsh_animation::NodeId>, Option<nsh_animation::NodeId>),
+    PanValues(
+        Option<crate::animation::NodeId>,
+        Option<crate::animation::NodeId>,
+    ),
     /// `numberOfLines`: the most lines shown; 0 (default) is unlimited.
     #[prop(js = "numberOfLines", on = TEXT)]
     NumberOfLines(u32),
@@ -1450,6 +1466,10 @@ pub enum Prop {
     /// `headerClass` of a page: the header's colors as classes (`bg-*`,
     /// `text-*`, `tint-*`); `headerStyle` wins over them.
     HeaderClass(Box<str>),
+    /// A page header's colors as typed styles lowered as classes are (Rust:
+    /// `Screen::header_style_with`), in place of `headerClass`;
+    /// `headerStyle` wins over them. Set by components, never by JS.
+    HeaderClassList(Option<Arc<crate::tailwind::ClassList>>),
     /// The surface lays out right to left (on the root, from
     /// `I18nManager`).
     #[prop(js = "layoutDirectionRtl", internal)]
@@ -1517,6 +1537,11 @@ pub enum Prop {
     /// closes a popover). Default true.
     #[prop(js = "focusable")]
     Focusable(Option<bool>),
+    /// The view is a selection area (`SelectionArea` of `nsh/base`): the
+    /// texts in it share one selection ([`crate::selection`]); set by
+    /// components (`Element::selection_area`).
+    #[prop(js = "selectionArea", internal)]
+    SelectionArea(bool),
     /// `allowFontScaling`: follow the system text size (default true).
     #[prop(js = "allowFontScaling", default = true, on = TEXT | INPUT)]
     AllowFontScaling(bool),
@@ -1537,10 +1562,10 @@ pub enum Prop {
     MinimumFontScale(f32),
     /// `pinch`: two-finger pinches drive `scale` natively.
     #[prop(js = "pinch", with = crate::js::host_values::pinch, reset = Prop::PinchValue(None), ts = "{ scale?: AnimatedValue }")]
-    PinchValue(Option<nsh_animation::NodeId>),
+    PinchValue(Option<crate::animation::NodeId>),
     /// `rotation`: two-finger rotations drive `angle` (degrees) natively.
     #[prop(js = "rotation", with = crate::js::host_values::rotation, reset = Prop::RotationValue(None), ts = "{ angle?: AnimatedValue }")]
-    RotationValue(Option<nsh_animation::NodeId>),
+    RotationValue(Option<crate::animation::NodeId>),
     /// A screen option.
     #[prop(nested)]
     Screen(ScreenProp),

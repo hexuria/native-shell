@@ -21,6 +21,8 @@
 #![cfg(target_os = "macos")]
 
 mod access;
+#[cfg(feature = "dev")]
+mod agent;
 mod animation;
 mod app;
 mod blur;
@@ -39,9 +41,11 @@ mod mount;
 mod native;
 mod navigation;
 mod net;
-mod script;
 mod scroll;
+mod selection_area;
 mod surface;
+#[cfg(feature = "dev")]
+mod synth;
 mod system;
 mod text;
 mod text_input;
@@ -55,6 +59,8 @@ pub use objc2;
 pub use objc2_app_kit;
 pub use objc2_foundation;
 
+#[cfg(feature = "dev")]
+pub use crate::app::set_root;
 pub use crate::{
     app::{AppOptions, AppSource, AppView, quit_app, run_app, set_ui_sets},
     image::AssetBase,

@@ -21,6 +21,7 @@ use std::{
 use crossbeam_channel::{Receiver, Sender};
 use nsh_core::{
     ApproxTextEngine, MountBatch,
+    geometry::{Points, Size},
     platform::{Locale, Os},
     ui::{Callback, Registry, Root, prelude::timer},
 };
@@ -29,11 +30,12 @@ use nsh_engine::{
 };
 
 use crate::{
+    MemoryStorage,
+    driver::{Driver, Host, Remote},
     headless::{
-        DirectoryAssets, Headless, MemoryStorage, RecordingNetwork, StubNetwork, UreqNetwork,
-        print_batch,
+        DirectoryAssets, Headless, RecordingNetwork, StubNetwork, UreqNetwork, WAIT, print_batch,
     },
-    module::{Case, Hook, Item, Launch, MobilePlatform, Mode, NetworkSetup, Suite},
+    module::{Case, Hook, Item, Launch, MobilePlatform, Mode, NetworkSetup, SafeArea, Suite},
 };
 
 /// Builds an entry ([`Entry`]; an app's may be its directory).
@@ -79,6 +81,96 @@ pub struct TestRun {
     /// Prints each batch of the apps the tests open, under the step it came
     /// in, and logs their commits' timings.
     pub trace: Option<Output>,
+    /// Opens the apps on a real platform's host instead of a headless
+    /// engine (`nsh test --target`).
+    pub host: Option<StartHost>,
+}
+
+/// Starts the app whose entry is the path on a real platform's host, as
+/// [`HostOptions`] say, once it connected (`nsh test --target`): what takes
+/// the test's steps.
+pub type StartHost =
+    Arc<dyn Fn(&Path, &HostOptions) -> Result<Box<dyn Host>, String> + Send + Sync>;
+
+/// How [`StartHost`] starts an app.
+#[derive(Clone, Default)]
+#[non_exhaustive]
+pub struct HostOptions {
+    /// The window's (viewport's) size in points: the headless phone's,
+    /// 390 × 844, unless `open` says.
+    pub size: Option<Size<Points>>,
+    /// The storage the app starts with, in place of its own
+    /// (`nsh_dev::DevServer::set_test_storage`).
+    pub storage: Vec<(String, String)>,
+    /// What answers the app's requests (`nsh_dev::DevServer::set_test_network`):
+    /// the test's routes, the network itself, or none.
+    pub network: Option<Arc<dyn nsh_dev::protocol::TestNetwork>>,
+    /// Traces the app (`nsh test --trace`, `nsh_dev::DevServer::set_test_trace`):
+    /// what prints the items of each batch it applied, a line each
+    /// (`nsh_dev::ClientEvent::Trace`), under the step it came in.
+    pub trace: Option<Arc<dyn Fn(Vec<String>) + Send + Sync>>,
+}
+
+impl std::fmt::Debug for HostOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostOptions")
+            .field("size", &self.size)
+            .field("storage", &self.storage)
+            .field("network", &self.network.is_some())
+            .field("trace", &self.trace.is_some())
+            .finish()
+    }
+}
+
+/// The test's side of a host's app's requests: they are kept (`requests()`),
+/// then answered from the routes, failed, or let through to the host's own
+/// network (`network: "live"`).
+struct HostRoutes {
+    requests: Arc<RecordingNetwork>,
+    /// Let through: the host's network makes them.
+    live: bool,
+}
+
+impl nsh_dev::protocol::TestNetwork for HostRoutes {
+    fn fetch(
+        &self,
+        request: nsh_dev::protocol::WireRequest,
+        mut reply: Box<dyn FnMut(nsh_dev::protocol::FetchReply) + Send>,
+    ) -> Box<dyn FnOnce() + Send> {
+        use nsh_dev::protocol::FetchReply;
+        use nsh_engine::{FetchEvent, HttpBody, HttpRequest, Network as _};
+        let request = HttpRequest {
+            method: request.method,
+            url: request.url,
+            headers: request.headers,
+            body: if request.body.is_empty() {
+                HttpBody::Empty
+            } else {
+                HttpBody::Bytes(request.body)
+            },
+            follow_redirects: request.follow_redirects,
+        };
+        if self.live {
+            self.requests.record(request);
+            reply(FetchReply::Pass);
+            return Box::new(|| {});
+        }
+        let task = self.requests.fetch(
+            request,
+            Box::new(move |event| match event {
+                FetchEvent::Head(head) => reply(FetchReply::Head {
+                    status: head.status,
+                    headers: head.headers,
+                    url: head.url,
+                }),
+                FetchEvent::Data(bytes) => reply(FetchReply::Data { bytes }),
+                FetchEvent::End => reply(FetchReply::End),
+                FetchEvent::Failed(message) => reply(FetchReply::Failed { message }),
+                FetchEvent::BodyWanted => {}
+            }),
+        );
+        Box::new(move || task.cancel())
+    }
 }
 
 /// How a test ended.
@@ -288,7 +380,15 @@ impl MountSink for VmSink {
 }
 
 /// An app a test opened: closed (`None`) when the test ends.
-pub(crate) type OpenApp = Arc<Mutex<Option<Headless>>>;
+pub(crate) type OpenApp = Arc<Mutex<Option<Box<dyn Driver>>>>;
+
+/// What `open` gives the test's `App`: the app, and on a headless engine
+/// its storage and the requests it made.
+pub(crate) type Opened = (
+    OpenApp,
+    Option<Arc<MemoryStorage>>,
+    Option<Arc<RecordingNetwork>>,
+);
 
 /// The test file being run, for its VM's calls.
 pub(crate) struct Session {
@@ -316,13 +416,12 @@ impl Session {
     }
 
     /// Starts the app at `entry` as `options` say, once it rendered.
-    pub(crate) fn open(
-        &self,
-        entry: &str,
-        launch: Launch,
-    ) -> Result<(OpenApp, Arc<MemoryStorage>, Arc<RecordingNetwork>), String> {
+    pub(crate) fn open(&self, entry: &str, launch: Launch) -> Result<Opened, String> {
         let path = self.dir.join(entry);
         let path = dunce::canonicalize(&path).map_err(|e| format!("open({entry:?}): {e}"))?;
+        if let Some(start) = &self.run.host {
+            return self.open_on_host(entry, &path, launch, start);
+        }
         let app = match self.build(&path)? {
             Built::Js(bundle, Some(map)) => nsh_engine::App::Js(bundle.with_source_map(map)),
             Built::Js(bundle, None) => nsh_engine::App::Js(*bundle),
@@ -399,12 +498,90 @@ impl Session {
         app.set_clipboard(launch.clipboard);
         app.step(format!("open({})", shown.display()));
         app.first_render()?;
-        let app = Arc::new(Mutex::new(Some(app)));
+        let app: OpenApp = Arc::new(Mutex::new(Some(Box::new(app))));
         self.apps
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(app.clone());
-        Ok((app, storage, requests))
+        Ok((app, Some(storage), Some(requests)))
+    }
+
+    /// Starts the app at `path` (`entry` as the test names it) on a real
+    /// platform's host ([`TestRun::host`]), once it rendered.
+    fn open_on_host(
+        &self,
+        entry: &str,
+        path: &Path,
+        launch: Launch,
+        start: &StartHost,
+    ) -> Result<Opened, String> {
+        // What a real platform cannot be given yet: refused rather than
+        // left out, so a test never passes on what it did not set up.
+        let refused = [
+            (launch.clipboard.is_some(), "`clipboard`"),
+            (launch.locale.is_some(), "`locale`"),
+            (launch.reduced_motion, "`reducedMotion`"),
+            (launch.safe_area != SafeArea::default(), "`safeArea`"),
+        ];
+        if let Some((_, what)) = refused.iter().find(|(set, _)| *set) {
+            return Err(format!(
+                "open({entry:?}): {what} runs headless only for now: run the test without `--target`"
+            ));
+        }
+        // The app's requests come to the test, as on a headless engine:
+        // answered from the routes, failed without any, or let through.
+        let (inner, live): (Arc<dyn nsh_engine::Network>, bool) = match launch.network {
+            NetworkSetup::Live => (Arc::new(StubNetwork::default()), true),
+            NetworkSetup::Stub(routes) => (Arc::new(StubNetwork::new(routes)), false),
+            NetworkSetup::None => (Arc::new(StubNetwork::default()), false),
+        };
+        let requests = RecordingNetwork::new(inner);
+        let storage: Vec<(String, String)> = launch.storage.0.into_iter().collect();
+        let size = match (launch.width, launch.height) {
+            (None, None) => None,
+            (w, h) => Some(Size::new(
+                w.unwrap_or(Points(390.0)),
+                h.unwrap_or(Points(844.0)),
+            )),
+        };
+        // The step a traced app's batches print under, as headless runs
+        // name them.
+        let shown = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| path.strip_prefix(cwd).ok().map(Path::to_path_buf))
+            .unwrap_or_else(|| path.to_path_buf());
+        let step = Arc::new(Mutex::new(format!("open({})", shown.display())));
+        let trace = self.run.trace.clone().map(|out| {
+            let step = step.clone();
+            Arc::new(move |items: Vec<String>| {
+                let step = step.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let mut out = out.lock().unwrap_or_else(|e| e.into_inner());
+                crate::trace::print_items(&mut **out, &step, &items);
+            }) as Arc<dyn Fn(Vec<String>) + Send + Sync>
+        });
+        let options = HostOptions {
+            size: size.or(Some(Size::new(Points(390.0), Points(844.0)))),
+            storage,
+            network: Some(Arc::new(HostRoutes {
+                requests: requests.clone(),
+                live,
+            })),
+            trace,
+        };
+        let host = start(path, &options).map_err(|e| format!("open({entry:?}): {e}"))?;
+        let remote = Remote::new(host, step);
+        remote.take(nsh_dev::protocol::TestStep::Ready {
+            timeout_ms: WAIT.as_millis() as u64 * 2,
+        })?;
+        if launch.color_scheme == crate::module::ColorScheme::Dark {
+            remote.take(nsh_dev::protocol::TestStep::SetColorScheme { dark: true })?;
+        }
+        let app: OpenApp = Arc::new(Mutex::new(Some(Box::new(remote))));
+        self.apps
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(app.clone());
+        Ok((app, None, Some(requests)))
     }
 
     /// The app at `path`, built once.
@@ -447,15 +624,7 @@ impl Session {
         let mut apps = self.apps.lock().unwrap_or_else(|e| e.into_inner());
         let screen = apps.iter().rev().find_map(|app| {
             let mut app = app.lock().unwrap_or_else(|e| e.into_inner());
-            let app = app.as_mut()?;
-            app.catch_up();
-            Some(
-                app.screen()
-                    .texts()
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect(),
-            )
+            app.as_mut()?.texts().ok()
         });
         let mark = mark.min(apps.len());
         for app in apps.drain(mark..) {
