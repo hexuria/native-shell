@@ -431,6 +431,16 @@ fn cursor_at(hit: &Hit) -> Cursor {
 
 /// Sets the cursor for the mouse at `(x, y)` (hosted views set their own).
 fn update_cursor(surface: &Surface, x: f32, y: f32) {
+    set_cursor_at(surface, x, y, true);
+}
+
+/// [`update_cursor`]; unless `always`, only when the app's cursor is
+/// another one. `-[NSCursor set]` costs milliseconds even for the cursor
+/// already set (with a customized pointer size or color it renders the
+/// cursor image again: ~3 ms on macOS 26), so what calls it while the mouse
+/// is still (batches, scroll steps, AppKit's cursor updates) skips it; a
+/// mouse that moves sets it, as it may come from another app's cursor.
+fn set_cursor_at(surface: &Surface, x: f32, y: f32, always: bool) {
     if surface.input.pointer.borrow().is_some() {
         // A drag keeps the cursor it began with.
         return;
@@ -440,14 +450,24 @@ fn update_cursor(surface: &Surface, x: f32, y: f32) {
         Some(hit) => cursor_at(&hit),
         None => Cursor::Default,
     };
-    ns_cursor(cursor).set();
+    let cursor = ns_cursor(cursor);
+    if always || NSCursor::currentCursor() != cursor {
+        cursor.set();
+    }
 }
 
 /// Sets the cursor again where the mouse is (what is under it changed).
 fn refresh_cursor(surface: &Surface) {
     if let Some((x, y)) = surface.input.last.get() {
-        update_cursor(surface, x, y);
+        set_cursor_at(surface, x, y, false);
     }
+}
+
+/// AppKit asks the view under the mouse for its cursor (`cursorUpdate:`,
+/// after views moved or were added): NSH's, which AppKit's default (the
+/// arrow, set again on every update) would replace.
+pub(crate) fn cursor_update(surface: &Surface) {
+    refresh_cursor(surface);
 }
 
 /// A repick waits this long after the last content move (ms): each repick
@@ -504,7 +524,7 @@ fn repick(key: u64) {
     surface.input.repick.set(false);
     if let Some((x, y)) = surface.input.last.get() {
         crate::surface::quiet(|| hover(&surface, x, y));
-        update_cursor(&surface, x, y);
+        set_cursor_at(&surface, x, y, false);
     }
 }
 

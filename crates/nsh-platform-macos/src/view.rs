@@ -604,6 +604,16 @@ define_class!(
             self.pointer(event);
         }
 
+        // The root sets NSH's cursor; other views pass it up to it.
+        #[unsafe(method(cursorUpdate:))]
+        fn cursor_update(&self, event: &NSEvent) {
+            match self.surface() {
+                Some(surface) => crate::input::cursor_update(&surface),
+                // SAFETY: NSView's own handling (passes it up).
+                None => unsafe { msg_send![super(self), cursorUpdate: event] },
+            }
+        }
+
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
             match self.surface() {
