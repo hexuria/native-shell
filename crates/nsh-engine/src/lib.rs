@@ -2395,7 +2395,11 @@ impl PacedBinds {
 /// that the frame already sets is updated to the later size (unless the
 /// view scrolls in between): a row relaid over two commits must not send
 /// the platform a transient size, which clamps the offset before the
-/// content grows back (a list jumping when a row expands).
+/// content grows back (a list jumping when a row expands). An item that
+/// sets one part of a view whole (its frame, style, text, ...) replaces
+/// the frame's earlier one for that view: the platform would apply both
+/// in one pass, and a list's rounds (binds, then the paced ones) relay
+/// and restyle the same cells.
 fn extend_frame(frame: &mut Vec<nsh_core::MountItem>, items: Vec<nsh_core::MountItem>) {
     use nsh_core::MountItem;
     let start = frame.len();
@@ -2413,6 +2417,33 @@ fn extend_frame(frame: &mut Vec<nsh_core::MountItem>, items: Vec<nsh_core::Mount
             *s = size;
         }
     }
+    if start == 0 {
+        return;
+    }
+    let later: rustc_hash::FxHashSet<_> = frame[start..].iter().filter_map(sets_whole).collect();
+    if later.is_empty() {
+        return;
+    }
+    let mut k = 0;
+    frame.retain(|m| {
+        k += 1;
+        k > start || sets_whole(m).is_none_or(|key| !later.contains(&key))
+    });
+}
+
+/// The part of a view an item sets whole, and the view: of two such items
+/// the later is all the view ends up with.
+fn sets_whole(item: &nsh_core::MountItem) -> Option<(u8, nsh_core::NodeId)> {
+    use nsh_core::MountItem;
+    Some(match *item {
+        MountItem::Frame { id, .. } => (0, id),
+        MountItem::Overflow { id, .. } => (1, id),
+        MountItem::ViewStyle { id, .. } => (2, id),
+        MountItem::Text { id, .. } => (3, id),
+        MountItem::Events { id, .. } => (4, id),
+        MountItem::Image { id, .. } => (5, id),
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -2537,5 +2568,35 @@ mod tests {
         ];
         super::extend_frame(&mut frame, vec![content(Points(544.0))]);
         assert_eq!(heights(&frame), [313.0, 544.0]);
+    }
+
+    #[test]
+    fn a_frame_sends_a_views_last_frame_once() {
+        use nsh_core::{Bounds, Point};
+        let at = |id, y| MountItem::Frame {
+            id,
+            frame: Bounds::new(
+                Point::new(Points(0.0), Points(y)),
+                Size::new(Points(10.0), Points(10.0)),
+            ),
+        };
+        let mut frame = vec![
+            MountItem::Create {
+                id: 4,
+                kind: nsh_core::ViewKind::View,
+            },
+            at(4, 0.0),
+            at(6, 0.0),
+        ];
+        super::extend_frame(&mut frame, vec![at(4, 50.0)]);
+        assert!(matches!(frame[0], MountItem::Create { id: 4, .. }));
+        let frames: Vec<_> = frame
+            .iter()
+            .filter_map(|m| match m {
+                MountItem::Frame { id, frame } => Some((*id, frame.origin.y.0)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames, [(6, 0.0), (4, 50.0)]);
     }
 }
