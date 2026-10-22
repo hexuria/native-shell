@@ -137,6 +137,8 @@ pub(crate) struct Chrome {
     menu: RefCell<Option<Retained<NSMenu>>>,
     /// Only the toolbar this surface attached; dropping it restores the window.
     toolbar: RefCell<Option<TitleBarToolbar>>,
+    /// A measurement of the area after a resize is queued ([`resized`]).
+    remeasure: Cell<bool>,
 }
 
 impl Drop for Chrome {
@@ -161,6 +163,32 @@ fn full_screen(window: &NSWindow) -> bool {
     window.styleMask().contains(NSWindowStyleMask::FullScreen)
 }
 
+/// The surface resized: full screen and the window's size change the
+/// title bar's area.
+pub(crate) fn resized(surface: &Surface) {
+    let toolbar = surface.chrome.style.get() == TitleBarStyle::Hidden
+        && window(surface).is_some_and(|w| w.toolbar().is_some());
+    if !toolbar {
+        update_area(surface);
+        return;
+    }
+    // A resize runs inside the window's setFrame:, before AppKit has laid
+    // the toolbar out for the new frame (not even layoutIfNeeded can), and
+    // contentLayoutRect is the old frame's. Measure once the frame change
+    // is done; the toolbar's height does not follow the window's, so the
+    // area reported meanwhile stays right. Once per run of resizes.
+    if surface.chrome.remeasure.replace(true) {
+        return;
+    }
+    let key = surface.key();
+    DispatchQueue::main().exec_async(move || {
+        if let Some(surface) = Surface::with_key(key) {
+            surface.chrome.remeasure.set(false);
+            update_area(&surface);
+        }
+    });
+}
+
 /// Tells the app the hidden title bar's area (after a style change, a
 /// resize, full screen).
 pub(crate) fn update_area(surface: &Surface) {
@@ -176,17 +204,11 @@ pub(crate) fn update_area(surface: &Surface) {
                 MainThreadMarker::from(&*window),
             );
             let natural = (frame.size.height - content.size.height) as f32;
-            // Our own title-bar toolbar is an empty stand-in for light
-            // placement: the area the app reserved is the requested
-            // height (at least the natural bar). A host's own toolbar has
-            // a native height instead — measure the unobscured rect.
-            let height = if surface.chrome.toolbar.borrow().is_some() {
-                surface
-                    .chrome
-                    .height
-                    .get()
-                    .map_or(natural, |h| natural.max(h))
-            } else if window.toolbar().is_some() {
+            // A toolbar's height is AppKit's, not the requested height that
+            // selected its style: the traffic lights are centered in it.
+            // Measure ours and a host's alike, so the app reserves the
+            // actual obscured area.
+            let height = if window.toolbar().is_some() {
                 toolbar_height(frame.size.height, window.contentLayoutRect(), natural)
             } else {
                 natural
