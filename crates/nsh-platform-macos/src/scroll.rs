@@ -479,6 +479,51 @@ fn commit_due(
     !link_busy || t - since >= REST_WAIT
 }
 
+/// Commits every pending scroll offset of `surface` to its container's
+/// bounds now: before anything asks AppKit where views are (a press's hit
+/// test, a conversion of rectangles), which follows the bounds, not the
+/// layer transforms showing the offsets meanwhile. The armed commits still
+/// run, and find nothing left to move.
+pub(crate) fn commit_pending(surface: &Surface) {
+    let Ok(mounter) = surface.mounter.try_borrow() else {
+        return;
+    };
+    let pending: Vec<NshView> = mounter
+        .views
+        .values()
+        .filter(|v| {
+            v.state()
+                .scroll
+                .as_ref()
+                .is_some_and(|s| s.live.commit_armed)
+        })
+        .cloned()
+        .collect();
+    drop(mounter);
+    for view in pending {
+        commit_now(&view);
+    }
+}
+
+/// [`commit_pending`] for the scroll views around `view` only (what
+/// AppKit's geometry of `view` depends on).
+pub(crate) fn commit_ancestors(view: &NshView) {
+    for v in std::iter::successors(Some(view.clone()), NshView::parent_view) {
+        if v.state()
+            .scroll
+            .as_ref()
+            .is_some_and(|s| s.live.commit_armed)
+        {
+            commit_now(&v);
+        }
+    }
+}
+
+fn commit_now(view: &NshView) {
+    let origin = bounds_origin(view);
+    crate::surface::quiet(|| view.commit_bounds_origin(origin.0, origin.1));
+}
+
 /// Moves the scroll offset the layer transform has been showing into the
 /// container's bounds: a single subtree walk updates tracking areas,
 /// cursor rects and accessibility with where things really are.
@@ -1804,6 +1849,8 @@ fn key_scroll_view(view: &NshView, horizontal: bool, dx: f32, dy: f32) -> Option
 /// as iOS and Android do for the focused field. For the text fields: call
 /// it when one gets the keyboard focus.
 pub(crate) fn reveal(surface: &Rc<Surface>, target: &NshView) {
+    // The rectangles are AppKit's, which the bounds place.
+    commit_ancestors(target);
     // Content moved by the scroll views inside, which rectangles measured
     // now do not show yet.
     let (mut moved_x, mut moved_y) = (0.0, 0.0);

@@ -476,6 +476,14 @@ define_class!(
 
         #[unsafe(method_id(hitTest:))]
         fn hit_test(&self, point: NSPoint) -> Option<Retained<NSView>> {
+            // A press hit tests (and its hosted view converts it) with
+            // AppKit's geometry: scroll offsets still shown as layer
+            // transforms move into the bounds first.
+            if let Some(surface) = self.surface()
+                && pressing(self.mtm())
+            {
+                crate::scroll::commit_pending(&surface);
+            }
             // SAFETY: NSView's own hit testing.
             let hit: Option<Retained<NSView>> = unsafe { msg_send![super(self), hitTest: point] };
             // The root takes every event over the app's own views and
@@ -848,6 +856,22 @@ fn clicking(mtm: MainThreadMarker) -> bool {
         })
 }
 
+/// Whether the event AppKit handles (or the test agent hands the window)
+/// is a mouse press.
+fn pressing(mtm: MainThreadMarker) -> bool {
+    scripted_type().map_or_else(
+        || clicking(mtm),
+        |t| {
+            matches!(
+                t,
+                NSEventType::LeftMouseDown
+                    | NSEventType::RightMouseDown
+                    | NSEventType::OtherMouseDown
+            )
+        },
+    )
+}
+
 /// Whether the event AppKit handles is a mouse wheel or trackpad scroll.
 fn scrolling(mtm: MainThreadMarker) -> bool {
     scripted_type()
@@ -1069,10 +1093,13 @@ impl NshView {
     /// Commits the scroll offset to the container's bounds origin and
     /// drops the layer transform: a no-op visually (the transform carried
     /// exactly the committed-to-live difference), one subtree walk for
-    /// AppKit to learn where things are.
+    /// AppKit to learn where things are; none when they are there.
     pub(crate) fn commit_bounds_origin(&self, x: f32, y: f32) {
         let c = self.ensure_container();
-        c.setBoundsOrigin(NSPoint::new(x as CGFloat, y as CGFloat));
+        let origin = NSPoint::new(x as CGFloat, y as CGFloat);
+        if c.bounds().origin != origin {
+            c.setBoundsOrigin(origin);
+        }
         if let Some(layer) = c.layer() {
             layer.setSublayerTransform(IDENTITY);
         }
