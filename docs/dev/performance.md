@@ -195,6 +195,25 @@ draw a panel.
   p50 ~1.9 → ~1.7 ms, CPU ~38–40% both; a test canvas (524×340: a 400-point area and line, 400 bars, a pulsing ring,
   a moving square) presented 86–117 fps before and 92–119 after, `main` p50 ~1.2 → ~1.0 ms, CPU ~17% both.
 
+  List binds while scrolling (release host, 120 Hz MacBook Pro; the list scrolled by chained native
+  `scrollToOffset({ animated: true })` every 300 ms, no input; each display link refresh logged with its link
+  timestamp and main-thread time; three runs each, refreshes missed = link gaps of two periods or more). Before =
+  four cells per turn on `Wake`; after = the viewport bound at once, the overscan paced per frame, one item per view
+  part per merged frame, batches applied at frame start (4 ms), the cursor set only when it changes:
+
+  | Scenario | Before: fps, missed, main mean / p99 / max | After: fps, missed, main mean / p99 / max |
+  |---|---|---|
+  | 1100 rows of 76 pt, 390×844, 6000 pt/s | 119.2–119.9, 1–12, 0.31–0.32 / 1.2 / 1.9–2.0 ms | 118.5–119.2, 12–22, 0.25–0.26 / 1.0 / 1.9–4.0 ms |
+  | The same at 16700 pt/s | 119.0–120.0, 0–6, 0.51–0.52 / 1.9–2.0 / 3.2–6.3 ms | 119.7–120.0, 0–2, 0.39–0.40 / 1.7 / 3.1–4.7 ms |
+  | Photos grid, 1200×800, 6000 pt/s | 118.1–120.0, 0–53, 0.30–0.34 / 0.9–1.0 / 8.5–11.3 ms | 119.8–120.0, 0–6, 0.44–0.48 / 2.2–2.5 / 4.2–5.4 ms |
+
+  The rows' "after" runs were taken before the cursor change. Where the mouse was is not controlled: hover and cursor
+  work happen only with it over the window, which may be why the grid's mean rose. The missed refreshes do not follow the main thread's time (a run missing 18% had a 0.7 ms mean): the machine was loaded
+  (load average 8–29 from other processes), and one excluded run had ~100 ms stalls every 5 s with the main thread
+  idle. Frames over a refresh were the Photos grid's: setting the cursor as content moved under the mouse, which
+  renders its image again when the pointer is customized in Accessibility settings (45% of the main thread's
+  samples). Without that, a single batch of the first tiles a scroll shows costs 4–5 ms.
+
 - GPUI backend (`nsh-platform-gpui`; release with thin LTO, rootful Xwayland at scale 2, a focused 285×315 pt window at
   60 Hz, against the GTK backend (`GSK_RENDERER=ngl`) on the same display and bundle). `draw` is the surface element's
   prepaint and paint (the whole view tree, every frame), `frame` GPUI's whole frame with presenting (`ZED_MEASUREMENTS=1`),
