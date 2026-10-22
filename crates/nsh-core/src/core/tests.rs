@@ -1409,7 +1409,8 @@ fn scroll_content_is_sent_once_per_batch() {
 }
 
 /// Plays JS: creates a cell per new slot, renders a fixed-height
-/// row for each bind and confirms the index.
+/// row for each bind and confirms the index; the overscan too, as an
+/// engine with time to spare does.
 fn render_binds(
     c: &mut Core<FakeEngine>,
     next_id: &mut u32,
@@ -1418,6 +1419,7 @@ fn render_binds(
 ) -> usize {
     let mut binds = Vec::new();
     c.take_list_binds(&mut binds);
+    c.take_paced_list_binds(usize::MAX, &mut binds);
     let mut count = 0;
     for bind in binds {
         for (slot, index) in bind.binds {

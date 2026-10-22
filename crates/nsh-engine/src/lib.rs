@@ -564,9 +564,9 @@ pub trait MountSink: Send + 'static {
     }
 
     /// JS or a component's task asked for a display frame
-    /// (`requestAnimationFrame`, `ui::ambient::next_frame`): call
-    /// [`EngineControl::frame`] at the next vsync. Requests are not repeated
-    /// until that call.
+    /// (`requestAnimationFrame`, `ui::ambient::next_frame`), or lists have
+    /// overscan cells left to bind: call [`EngineControl::frame`] at the
+    /// next vsync. Requests are not repeated until that call.
     fn request_frame(&self) {}
 
     /// A development update ([`EngineControl::hot_update`]) could not be
@@ -875,11 +875,15 @@ pub struct HotUpdate {
 /// leftovers continue next frame.
 const MAX_LIST_ROUNDS: usize = 8;
 
-/// Cells bound per turn. One bind rebuilds a cell's whole subtree, so a
-/// screen of binds in a single turn merges into a mount batch big enough to
-/// miss a frame when the platform applies it. Pacing the binds keeps each
-/// batch small; overscan gives the deferred cells room to arrive early.
-const BIND_CELLS_PER_TURN: usize = 4;
+/// The overscan a turn binds: cells until their ops reach this many (about
+/// as many mount items, which the main thread applies in one go) or their
+/// JS takes [`PACED_BIND_TIME`], at least one. A fast scroll asks for a
+/// screen of cells at once and each bind rebuilds a cell's subtree; what
+/// shows (the viewport, the leading edge, cells whose item moved) binds
+/// regardless, the rest on the next display frames.
+const PACED_BIND_OPS: usize = 150;
+/// See [`PACED_BIND_OPS`].
+const PACED_BIND_TIME: std::time::Duration = std::time::Duration::from_millis(2);
 
 /// A cheap, cloneable handle for sending input to the engine from any thread.
 #[derive(Clone)]
@@ -2010,7 +2014,9 @@ impl<M: TextEngine> State<M> {
     /// for one.
     fn request_frame(&mut self, script: Option<&Script>, sink: &dyn MountSink) {
         if !self.frame_requested
-            && (script.is_some_and(Script::wants_frame) || self.core.wants_frame())
+            && (script.is_some_and(Script::wants_frame)
+                || self.core.wants_frame()
+                || (script.is_some() && self.core.has_paced_list_binds()))
         {
             self.frame_requested = true;
             sink.request_frame();
@@ -2052,12 +2058,8 @@ impl<M: TextEngine> State<M> {
         let mut merged: Option<MountBatch> = None;
         let mut op_count = 0;
         let mut js = std::time::Duration::ZERO;
-        // A fast scroll asks for a screen of cells at once and each bind
-        // rebuilds a cell's whole subtree — merged, the mounts land on the
-        // platform in one transaction big enough to miss a frame. A few
-        // cells per turn keeps batches small; the rest bind next turn.
-        let mut cell_budget = BIND_CELLS_PER_TURN;
-        let mut deferred: Vec<ListBind> = Vec::new();
+        // The overscan bound this turn ([`PACED_BIND_OPS`]).
+        let mut paced = PacedBinds::default();
         for _ in 0..MAX_LIST_ROUNDS {
             // Requests from the previous round (or frame) first.
             let js_start = Instant::now();
@@ -2065,17 +2067,22 @@ impl<M: TextEngine> State<M> {
             // the core).
             let binds = self.binds.drain(..);
             if let Some(script) = script {
-                for mut bind in binds {
-                    if bind.binds.len() > cell_budget {
-                        deferred.push(ListBind {
-                            list: bind.list,
-                            binds: bind.binds.split_off(cell_budget),
-                        });
-                    }
-                    if !bind.binds.is_empty() {
-                        cell_budget -= bind.binds.len();
+                for bind in binds {
+                    script.bind_list(bind.list, &bind.binds);
+                }
+                script.take_ops(&mut self.ops);
+                let mut binds = Vec::new();
+                while paced.left() && self.core.has_paced_list_binds() {
+                    let start = Instant::now();
+                    let ops = self.ops.len();
+                    self.core.take_paced_list_binds(1, &mut binds);
+                    for bind in binds.drain(..) {
+                        paced.cells += bind.binds.len();
                         script.bind_list(bind.list, &bind.binds);
                     }
+                    script.take_ops(&mut self.ops);
+                    paced.ops += self.ops.len() - ops;
+                    paced.time += start.elapsed();
                 }
             } else {
                 drop(binds);
@@ -2152,17 +2159,11 @@ impl<M: TextEngine> State<M> {
                 }
                 _ => false,
             };
-            if !deferred.is_empty()
-                || (self.binds.is_empty() && self.events.is_empty() && !posted && !retheme)
+            let more_paced = script.is_some() && paced.left() && self.core.has_paced_list_binds();
+            if self.binds.is_empty() && self.events.is_empty() && !posted && !retheme && !more_paced
             {
                 break;
             }
-        }
-        if !deferred.is_empty() {
-            // Back in the queue ahead of anything that arrived since; the
-            // wake binds them on the next turn's fresh budget.
-            self.binds.splice(0..0, deferred);
-            let _ = self.net.tx.send(Message::Wake);
         }
         self.committed_since_gc |= op_count > 0;
         if self.perf.is_some() && (op_count > 0 || merged.is_some()) {
@@ -2372,6 +2373,22 @@ fn handle<M: TextEngine>(script: Option<&Script>, state: &mut State<M>, message:
         Message::Shutdown => return false,
     }
     true
+}
+
+/// What a turn spent binding overscan cells.
+#[derive(Default)]
+struct PacedBinds {
+    cells: usize,
+    ops: usize,
+    time: std::time::Duration,
+}
+
+impl PacedBinds {
+    /// Whether the turn may bind another: at least one, then within the
+    /// budget.
+    fn left(&self) -> bool {
+        self.cells == 0 || (self.ops < PACED_BIND_OPS && self.time < PACED_BIND_TIME)
+    }
 }
 
 /// Appends a commit's items to the frame's. A scroll view's content size

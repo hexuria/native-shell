@@ -655,6 +655,9 @@ pub struct Core<M: TextEngine> {
     /// headers under the status bar).
     safe_area: EdgeInsets,
     list_binds: Vec<ListBind>,
+    /// The runtime's lists with overscan cells waiting to bind
+    /// ([`Core::take_paced_list_binds`]), in the order they asked.
+    paced_lists: Vec<NodeId>,
     /// The events for JS, in order (the platform's and the core's events,
     /// Rust components' events, calls' results).
     events: Vec<crate::ui::JsEvent>,
@@ -757,6 +760,7 @@ impl<M: TextEngine> Core<M> {
             header_heights: (Points(44.0), Points(96.0)),
             safe_area: EdgeInsets::default(),
             list_binds: Vec::new(),
+            paced_lists: Vec::new(),
             events: Vec::new(),
             cells_scratch: Vec::new(),
             root,
@@ -997,9 +1001,54 @@ impl<M: TextEngine> Core<M> {
         Some((scroll.event_throttle_ms, content * z, frame, z))
     }
 
-    /// Moves list render requests produced by the last commit into `out`.
+    /// Moves list render requests produced by the last commit into `out`:
+    /// what must bind before the frame shows (cells whose item moved, cells
+    /// in the viewport and just ahead of it). The rest of the overscan
+    /// waits ([`Core::take_paced_list_binds`]).
     pub fn take_list_binds(&mut self, out: &mut Vec<ListBind>) {
         out.append(&mut self.list_binds);
+    }
+
+    /// Whether lists have overscan cells waiting to bind.
+    pub fn has_paced_list_binds(&self) -> bool {
+        !self.paced_lists.is_empty()
+    }
+
+    /// Hands out up to `cells` of the overscan cells waiting to bind, one
+    /// per list in turn (a nested list is not starved by its parent), each
+    /// list's nearest its leading edge first. What a list assigns now is
+    /// what waits: cells it left or whose items went are never handed out.
+    pub fn take_paced_list_binds(&mut self, cells: usize, out: &mut Vec<ListBind>) {
+        let mut left = cells;
+        let mut lists = std::mem::take(&mut self.paced_lists);
+        let start = out.len();
+        while left > 0 && !lists.is_empty() {
+            lists.retain(|&id| {
+                if left == 0 {
+                    return true;
+                }
+                let Some(list) = self
+                    .key(id)
+                    .ok()
+                    .and_then(|key| self.nodes[key as usize].list.as_mut())
+                else {
+                    return false;
+                };
+                let mut binds = Vec::new();
+                left -= list.take_paced(1, &mut binds);
+                if let Some((slot, index)) = binds.pop() {
+                    match out[start..].iter_mut().find(|b| b.list == id) {
+                        Some(bind) => bind.binds.push((slot, index)),
+                        None => out.push(ListBind {
+                            list: id,
+                            binds: vec![(slot, index)],
+                        }),
+                    }
+                }
+                list.has_paced()
+            });
+        }
+        self.paced_lists = lists;
     }
 
     /// Moves what the core hands JS (events it raised, such as
@@ -4846,7 +4895,11 @@ impl<M: TextEngine> Core<M> {
                 self.commands.push((id, command));
             }
 
+            // The components' own lists bind in the core, at once; the
+            // runtime's pace their overscan.
+            let paced = !self.components.is_virtual_list(id);
             let list = self.nodes[key as usize].list.as_mut().expect("list");
+            list.paced = paced;
             let mut binds = Vec::new();
             if list.update_window(&mut binds) {
                 self.events.push(crate::ui::JsEvent::Event(
@@ -4857,6 +4910,9 @@ impl<M: TextEngine> Core<M> {
             }
             if !binds.is_empty() {
                 self.list_binds.push(ListBind { list: id, binds });
+            }
+            if list.paced && list.has_paced() && !self.paced_lists.contains(&id) {
+                self.paced_lists.push(id);
             }
             if events.contains(EventKind::ViewableItemsChange) {
                 let viewable = list.viewable_items();
@@ -4888,15 +4944,16 @@ impl<M: TextEngine> Core<M> {
                     .iter()
                     .filter_map(|s| s.ready().map(|i| (i, s.cell))),
             );
-            // Cells left without an item still show their last one. Those
-            // in the render window (the data shrank, the list jumped) would
-            // show through: move them out of sight. Cells the window left
-            // behind while scrolling are out of sight already.
+            // Cells left without an item, or not showing theirs yet, still
+            // show their last one. Those in the render window (the data
+            // changed, the list jumped) would show through: move them out of
+            // sight. Cells the window left behind while scrolling are out of
+            // sight already.
             let (window_start, window_end) = list.render_window();
             let hidden: Vec<Key> = list
                 .slots
                 .iter()
-                .filter(|s| s.index.is_none() && s.cell != u32::MAX)
+                .filter(|s| s.ready().is_none() && s.cell != u32::MAX)
                 .map(|s| s.cell)
                 .collect();
             for cell in hidden {
