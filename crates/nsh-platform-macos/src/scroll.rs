@@ -144,8 +144,11 @@ pub(crate) struct Live {
     /// When the moving offset should be committed to the container's
     /// bounds (ms; [`COMMIT_MS`] after the last move).
     commit_at: f64,
-    /// A bounds-commit task is scheduled, and since when (ms).
-    commit_armed: Option<f64>,
+    /// A bounds-commit task is scheduled.
+    commit_armed: bool,
+    /// Since when the armed commit found the view at rest (ms): it waits
+    /// for the display link to rest at most [`REST_WAIT`] from then.
+    rested_at: Option<f64>,
 }
 
 /// Where trackpad events (gestures and their momentum) put the offset, by
@@ -442,19 +445,39 @@ fn arm_commit(surface: &Rc<Surface>, view: &NshView) {
             return;
         };
         s.live.commit_at = now() + COMMIT_MS as f64;
-        if s.live.commit_armed.is_some() {
+        if std::mem::replace(&mut s.live.commit_armed, true) {
             return;
         }
-        s.live.commit_armed = Some(now());
         (surface.key(), state.id)
     };
     later(COMMIT_MS, move || commit(key, id));
 }
 
-/// The longest a bounds commit waits for a scroll phase to settle (ms).
-/// AppKit's model must eventually be right (tracking, accessibility,
-/// hosted views); a view that keeps receiving input commits anyway.
-const COMMIT_WAIT: f64 = 3000.0;
+/// The longest a bounds commit waits for the display link to rest once the
+/// view is at rest (ms): past the indicator's fade, so a scroll alone
+/// commits when nothing draws, while an animation that keeps the link
+/// running (a spinner) does not hold AppKit's model back for long.
+const REST_WAIT: f64 = 1000.0;
+
+/// Whether the armed bounds commit lands at `t` (ms): the offset has not
+/// moved for [`COMMIT_MS`] (`commit_at`) and no scroll phase runs (`idle`;
+/// input and glides go on as long as they last, each frame moving only the
+/// layer transform), then once the display link rests (`link_busy` false)
+/// or [`REST_WAIT`] after the view came to rest (`rested_at`, kept here).
+fn commit_due(
+    t: f64,
+    commit_at: f64,
+    idle: bool,
+    link_busy: bool,
+    rested_at: &mut Option<f64>,
+) -> bool {
+    if commit_at - t > 1.0 || !idle {
+        *rested_at = None;
+        return false;
+    }
+    let since = *rested_at.get_or_insert(t);
+    !link_busy || t - since >= REST_WAIT
+}
 
 /// Moves the scroll offset the layer transform has been showing into the
 /// container's bounds: a single subtree walk updates tracking areas,
@@ -472,27 +495,33 @@ fn commit(key: u64, id: nsh_core::NodeId) {
         return;
     };
     drop(mounter);
-    let t = now();
-    let (wait, armed_since) = {
-        let state = view.state();
-        let Some(s) = &state.scroll else {
-            return;
-        };
-        (s.live.commit_at - t, s.live.commit_armed)
-    };
     // `setBoundsOrigin` walks the whole subtree (descendants' window
     // geometry, tracking areas, cursor rects, hosted views' remote
     // state): on a live frame that walk drops it, so the commit waits
     // for the display link to rest — the input ended and nothing draws.
-    let overdue = armed_since.is_some_and(|armed| t - armed >= COMMIT_WAIT);
-    if !overdue
-        && (wait > 1.0 || phase(&view) != Phase::Idle || surface.wants_frames())
-    {
+    let idle = phase(&view) == Phase::Idle;
+    let link_busy = surface.wants_frames();
+    let due = {
+        let mut state = view.state_mut();
+        let Some(s) = state.scroll.as_mut() else {
+            return;
+        };
+        let due = commit_due(
+            now(),
+            s.live.commit_at,
+            idle,
+            link_busy,
+            &mut s.live.rested_at,
+        );
+        if due {
+            s.live.commit_armed = false;
+            s.live.rested_at = None;
+        }
+        due
+    };
+    if !due {
         later(32, move || commit(key, id));
         return;
-    }
-    if let Some(s) = view.state_mut().scroll.as_mut() {
-        s.live.commit_armed = None;
     }
     let origin = bounds_origin(&view);
     crate::surface::quiet(|| view.commit_bounds_origin(origin.0, origin.1));
@@ -1829,6 +1858,44 @@ pub(crate) fn reveal(surface: &Rc<Surface>, target: &NshView) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_scroll_commits_only_when_it_ends() {
+        let mut rested = None;
+        // Ten seconds of input or glide: never mid-scroll.
+        for t in (0..10_000).step_by(16) {
+            let t = t as f64;
+            assert!(!commit_due(t, t + 140.0, false, true, &mut rested));
+        }
+        // The offset still moved recently: not yet.
+        assert!(!commit_due(10_000.0, 10_100.0, true, false, &mut rested));
+        // At rest, with the display link resting too.
+        assert!(commit_due(10_200.0, 10_100.0, true, false, &mut rested));
+    }
+
+    #[test]
+    fn a_running_animation_holds_a_commit_only_briefly() {
+        let mut rested = None;
+        assert!(!commit_due(1000.0, 900.0, true, true, &mut rested));
+        assert!(!commit_due(
+            1000.0 + REST_WAIT - 32.0,
+            900.0,
+            true,
+            true,
+            &mut rested
+        ));
+        assert!(commit_due(
+            1000.0 + REST_WAIT,
+            900.0,
+            true,
+            true,
+            &mut rested
+        ));
+        // Input again starts the wait over.
+        let mut rested = Some(0.0);
+        assert!(!commit_due(5000.0, 4900.0, false, true, &mut rested));
+        assert_eq!(rested, None);
+    }
 
     #[test]
     fn resampling_moves_evenly_between_events() {
