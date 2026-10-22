@@ -437,7 +437,13 @@ fn update_cursor(surface: &Surface, x: f32, y: f32) {
         Some(hit) => cursor_at(&hit),
         None => Cursor::Default,
     };
-    ns_cursor(cursor).set();
+    let cursor = ns_cursor(cursor);
+    // Setting a cursor redraws its image when the system's cursor is
+    // customized (Accessibility's pointer size or colors): milliseconds
+    // on every frame of a scroll, which moves content under the mouse.
+    if !std::ptr::eq(&*NSCursor::currentCursor(), &*cursor) {
+        cursor.set();
+    }
 }
 
 /// Sets the cursor again where the mouse is (what is under it changed).
