@@ -320,6 +320,12 @@ Things that were found the hard way. Read the section of the area you change bef
   `cursorUpdate:`, which AppKit calls after views move or are added, sets the arrow. Set the cursor only when it
   changes while the mouse is still (`input::set_cursor_at`), and answer `cursorUpdate:` with NSH's cursor: a scroll
   that mounts rows ten times a second otherwise spends a third of those frames setting the same cursor.
+- AppKit's geometry (`hitTest:`, `convertPoint:` / `convertRect:`, `visibleRect`) follows bounds, not a
+  `sublayerTransform`: while a scroll offset is only the container layer's transform, AppKit places every view
+  below it at the last committed offset. Commit it first (`scroll::commit_pending` on a press,
+  `scroll::commit_ancestors` before a conversion); clip and pick by NSH's own placed frames and
+  `scroll::bounds_origin`. A view's logical frame (`ViewState::frame`) misses its sticky shift and RTL mirroring:
+  clip spaces are the placed frames (`ns().frame()`).
 - In `define_class!` methods, an early `return` of a `bool` or `Option<Retained<_>>` does not compile (the macro wraps
   the return type): write the body as one expression.
 - In-process screenshots (`cacheDisplayInRect:`, `renderInContext:`) ignore `maskedCorners`, `shadowPath`, Core Image

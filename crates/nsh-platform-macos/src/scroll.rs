@@ -4,8 +4,14 @@
 //! A scroll view only moves along its main axis (zooming is not
 //! supported: `zoomTo` and the zoom props are ignored). Its offset lives in
 //! [`ScrollState`] (`x` / `y`, 0 showing the start of the content inset)
-//! and is shown by its container's bounds origin, as `NSClipView` scrolls.
-//! Every change goes through [`moved_to`], which moves the bounds origin,
+//! and is shown by its container's layer's `sublayerTransform` while it
+//! moves; the container's bounds origin (as `NSClipView` scrolls) takes it
+//! once the view and the display link rest ([`commit_due`]), as
+//! `setBoundsOrigin:` walks the whole subtree. AppKit's geometry (hit
+//! tests, conversions, `visibleRect`) follows the bounds, so what asks it
+//! commits first ([`commit_pending`], [`commit_ancestors`]); NSH's own
+//! (picking, [`bounds_origin`]) follows the live offset.
+//! Every change goes through [`moved_to`], which moves the transform,
 //! pins the sticky cells, feeds the native scroll value in the same frame
 //! and queues a report to the engine. Reports are coalesced to one per
 //! frame by the view's frame callback, which also runs animated
@@ -26,7 +32,7 @@
 //!
 //! Mirrored (right to left) horizontal lists keep their offsets left to
 //! right: [`NshView::place`] puts each child at the mirror image of its
-//! frame, so the bounds origin is the offset negated, and wheels and the
+//! frame, so the shown origin is the offset negated, and wheels and the
 //! indicator are mirrored here.
 
 use std::{f32::consts::PI, rc::Rc};
