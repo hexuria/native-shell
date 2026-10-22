@@ -455,22 +455,39 @@ fn refresh_cursor(surface: &Surface) {
 /// burst re-arms the deadline so the pick lands once, when it settles.
 const REPICK_MS: f64 = 120.0;
 
-/// What is under the mouse may have moved (a scroll, a batch): hovered
-/// views and the cursor follow it, as AppKit's tracking areas do, though
-/// the mouse did not move. Once per main-queue turn, however many scroll
-/// views moved or batches came — and during a scroll burst it defers to
-/// `repick_at`, one trailing pick rather than a hit test per step.
-pub(crate) fn content_moved(surface: &Surface) {
+/// What is under the mouse may have moved (`scrolled`: a scroll step, else
+/// a batch): hovered views and the cursor follow it, as AppKit's tracking
+/// areas do, though the mouse did not move. Once per main-queue turn,
+/// however many scroll views moved or batches came — and during a scroll
+/// burst it defers to `repick_at`, one trailing pick rather than a hit
+/// test per step.
+pub(crate) fn content_moved(surface: &Surface, scrolled: bool) {
     let input = &surface.input;
     if input.last.get().is_none() {
         return;
     }
-    input.repick_at.set(crate::scroll::now() + REPICK_MS);
-    if input.repick.replace(true) {
+    let t = crate::scroll::now();
+    let armed = input.repick.replace(true);
+    let at = repick_deadline(armed, input.repick_at.get(), t, scrolled);
+    input.repick_at.set(at);
+    if armed {
         return;
     }
     let key = surface.key();
-    later(REPICK_MS as u64, move || repick(key));
+    later((at - t).max(0.0) as u64, move || repick(key));
+}
+
+/// When the repick lands, `content_moved` at `t`: a scroll step pushes it
+/// [`REPICK_MS`] on; a batch keeps an armed one's (batches every 50 ms
+/// would push it on for good), else it picks on the next turn.
+fn repick_deadline(armed: bool, at: f64, t: f64, scrolled: bool) -> f64 {
+    if scrolled {
+        t + REPICK_MS
+    } else if armed {
+        at
+    } else {
+        t
+    }
 }
 
 /// The armed repick: waits out the deadline `content_moved` keeps pushing
@@ -2127,6 +2144,22 @@ pub(crate) fn file_drop_target(surface: &Surface, x: f32, y: f32) -> Option<NshV
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batches_do_not_push_the_repick_on() {
+        // Scroll steps push it on: one pick once they stop.
+        let at = repick_deadline(false, 0.0, 1000.0, true);
+        assert_eq!(at, 1000.0 + REPICK_MS);
+        assert_eq!(repick_deadline(true, at, 1050.0, true), 1050.0 + REPICK_MS);
+        // A batch keeps the armed deadline, however often batches come...
+        let mut deadline = at;
+        for t in [1050.0, 1100.0, 1150.0] {
+            deadline = repick_deadline(true, deadline, t, false);
+        }
+        assert_eq!(deadline, at);
+        // ...and alone picks on the next turn.
+        assert_eq!(repick_deadline(false, 0.0, 2000.0, false), 2000.0);
+    }
 
     #[test]
     fn shortcut_keys_on_any_layout() {
