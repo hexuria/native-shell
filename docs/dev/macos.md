@@ -82,6 +82,10 @@ server client, log forwarding, the error overlay: `dev.rs`). The runtime needs m
   the events got to (`settle`).
 - **One hop per commit.** The engine runs on its own thread; its sink queues each commit and wakes the main queue once
   (`DispatchQueue::main`), and the main thread applies every queued batch in order (`surface.rs`, `mount.rs`).
+  While the display link runs (an animation, a scroll glide, a frame JS asked for, list binds still paced), batches
+  wait for the start of the next frame, and each frame applies them for at most 4 ms (`FRAME_BATCHES`, at least one
+  whole batch), carrying the rest: a scroll's frames are not delayed by batches landing between them, and a burst of
+  batches spreads over frames. An idle surface applies a batch as it lands; a resize applies the waiting ones first.
   Dispatched closures must be `Send`, so they find their surface by key in a thread-local map; no globals are shared
   between surfaces.
 - **Resizes are shown at once** (`Surface::resized`, the one place the main thread waits for the engine): when the

@@ -5,7 +5,12 @@
 //! wakes the main thread once (`DispatchQueue::main`); the main thread
 //! drains the queue and applies every batch in order ([`Surface::drain`]).
 //! Native animations and JS frame requests run on the root view's display
-//! link while there is something to do.
+//! link while there is something to do. While it runs, batches wait for
+//! the start of the next frame and each frame applies them for at most
+//! [`FRAME_BATCHES`] ([`Surface::apply_queued`]): a scroll glide's frames
+//! are not delayed by batches landing between them, and several batches
+//! (list binds while scrolling) spread over frames instead of one frame
+//! taking them all. An idle surface applies a batch as soon as it lands.
 //!
 //! The one exception to "the main thread never waits for JS": when the
 //! window resizes the root ([`Surface::resized`]), the main thread waits
@@ -21,6 +26,7 @@
 
 use std::{
     cell::{Cell, RefCell},
+    collections::VecDeque,
     path::PathBuf,
     rc::{Rc, Weak},
     sync::{
@@ -63,6 +69,11 @@ enum Message {
 /// How long the main thread waits for the layout at a new window size
 /// (a frame at 60 Hz): see the module doc.
 const RESIZE_WAIT: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// The main-thread time one frame spends applying queued batches
+/// ([`Surface::apply_queued`]): about half a refresh at 120 Hz, which
+/// leaves the rest to input, animations and Core Animation's commit.
+const FRAME_BATCHES: std::time::Duration = std::time::Duration::from_millis(4);
 
 thread_local! {
     /// The surfaces of this (main) thread, by key: the sink wakes one by
@@ -190,6 +201,9 @@ pub(crate) struct Surface {
     pub(crate) host_environment: Cell<nsh_core::platform::HostEnvironment>,
     /// JS asked for a display frame.
     js_frame: Cell<bool>,
+    /// Batches that arrived while frames run, applied at the start of the
+    /// next ones ([`Surface::apply_queued`]); only [`Message::Batch`].
+    queued: RefCell<VecDeque<Message>>,
     /// Frame callbacks of the platform's own animations (scroll glides,
     /// transitions): called on every frame while they return true.
     frame_callbacks: RefCell<Vec<FrameCallback>>,
@@ -251,6 +265,7 @@ impl Surface {
             chunks: RefCell::new(None),
             host_environment: Cell::default(),
             js_frame: Cell::new(false),
+            queued: RefCell::default(),
             frame_callbacks: RefCell::default(),
             #[cfg(feature = "dev")]
             test_model: RefCell::default(),
@@ -343,6 +358,7 @@ impl Surface {
         crate::input::reset(self);
         crate::keymap::clear(self);
         self.js_frame.set(false);
+        self.queued.borrow_mut().clear();
         self.resize_late.set(false);
         self.frame_callbacks.borrow_mut().clear();
     }
@@ -425,6 +441,11 @@ impl Surface {
         // Measured as main-thread work: the wait is part of the frame.
         self.measure(true, || {
             quiet(|| {
+                // What waited for a frame comes before the new layout.
+                let queued = std::mem::take(&mut *self.queued.borrow_mut());
+                for message in queued {
+                    applied |= self.handle(message, monitor.as_deref());
+                }
                 loop {
                     let Ok(message) = rx.recv_deadline(deadline) else {
                         self.resize_late.set(true);
@@ -470,7 +491,8 @@ impl Surface {
         r
     }
 
-    /// Applies what the engine sent.
+    /// Handles what the engine sent. While frames run (see the module
+    /// doc), batches wait for the next one ([`Surface::apply_queued`]).
     fn drain(self: &Rc<Self>) {
         let monitor = self.perf.borrow().clone();
         let start = monitor.as_ref().map(|_| Instant::now());
@@ -482,6 +504,11 @@ impl Surface {
         let mut applied = false;
         quiet(|| {
             for message in messages {
+                // Queued behind earlier batches too, which keeps the order.
+                if matches!(message, Message::Batch(..)) && self.wants_frames() {
+                    self.queued.borrow_mut().push_back(message);
+                    continue;
+                }
                 applied |= self.handle(message, monitor.as_deref());
             }
             if applied {
@@ -602,10 +629,12 @@ impl Surface {
     }
 
     /// Whether a native animation runs: the graph's, or the platform's own
-    /// (scroll glides, zooms).
+    /// (scroll glides, zooms); or batches wait for the next frame.
     #[cfg(feature = "dev")]
     pub(crate) fn animating(&self) -> bool {
-        self.anim.borrow().animating() || !self.frame_callbacks.borrow().is_empty()
+        self.anim.borrow().animating()
+            || !self.frame_callbacks.borrow().is_empty()
+            || !self.queued.borrow().is_empty()
     }
 
     /// Keeps the model `nsh test --target` steps see of the app
@@ -618,6 +647,7 @@ impl Surface {
 
     fn wants_frames(&self) -> bool {
         self.js_frame.get()
+            || !self.queued.borrow().is_empty()
             || self.anim.borrow().animating()
             || !self.frame_callbacks.borrow().is_empty()
     }
@@ -735,6 +765,7 @@ impl Surface {
     }
 
     fn tick(self: &Rc<Self>, now: f64) {
+        self.apply_queued(FRAME_BATCHES);
         if self.anim.borrow().animating() {
             self.anim.borrow_mut().tick(now);
             self.write_animations();
@@ -753,6 +784,28 @@ impl Surface {
             self.control(|c| c.frame());
         }
         self.revisit();
+    }
+
+    /// Applies the batches that waited for this frame, in order, until
+    /// `budget` is spent (at least one): the rest wait for the next frame,
+    /// so one frame's main-thread work stays bounded when the engine sent
+    /// several. A batch is the state of one commit and is applied whole.
+    fn apply_queued(self: &Rc<Self>, budget: std::time::Duration) {
+        if self.queued.borrow().is_empty() {
+            return;
+        }
+        let monitor = self.perf.borrow().clone();
+        let start = Instant::now();
+        let mut applied = false;
+        while !applied || start.elapsed() < budget {
+            let Some(message) = self.queued.borrow_mut().pop_front() else {
+                break;
+            };
+            applied |= self.handle(message, monitor.as_deref());
+        }
+        if applied {
+            self.write_animations();
+        }
     }
 
     /// Draws views whose drawing changed out of sight and that show now
