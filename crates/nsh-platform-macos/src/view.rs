@@ -1194,34 +1194,12 @@ impl NshView {
         // ([`crate::scroll::bounds_origin`]; a plain view's is (0, 0)).
         // Ancestor transforms are not applied: nearly all are identity,
         // and a transformed clip at most defers or draws early.
-        // The placed frame (`ns().frame()`, mirroring applied), not the
-        // logical one, as the clip spaces are the ancestors' containers'.
-        let f = ns.frame();
-        let (mut x0, mut y0) = (f.origin.x as f32, f.origin.y as f32);
-        let (mut x1, mut y1) = (
-            f.origin.x as f32 + f.size.width as f32,
-            f.origin.y as f32 + f.size.height as f32,
-        );
-        let mut parent = self.parent_view();
-        while let Some(p) = parent {
-            let s = p.state();
-            let (ox, oy) = crate::scroll::bounds_origin(&p);
-            x0 = x0.max(ox);
-            y0 = y0.max(oy);
-            x1 = x1.min(ox + s.frame.size.width.0);
-            y1 = y1.min(oy + s.frame.size.height.0);
-            if x1 <= x0 || y1 <= y0 {
-                return false;
-            }
-            // Into the grandparent's content space: the offset origin
-            // shows at the frame's origin.
-            x0 += s.frame.origin.x.0 - ox;
-            x1 += s.frame.origin.x.0 - ox;
-            y0 += s.frame.origin.y.0 - oy;
-            y1 += s.frame.origin.y.0 - oy;
-            parent = p.parent_view();
-        }
-        true
+        // Placed frames (`ns().frame()`: a sticky shift and mirroring
+        // applied), not the logical ones, for the view and its ancestors
+        // alike: the clip spaces are the ancestors' containers'.
+        let ancestors = std::iter::successors(self.parent_view(), NshView::parent_view)
+            .map(|p| (placed(p.ns().frame()), crate::scroll::bounds_origin(&p)));
+        clip_shows(placed(ns.frame()), ancestors)
     }
 
     /// Its frame, transform or shift changed: places it again.
@@ -1406,9 +1384,75 @@ impl NshView {
     }
 }
 
+/// A rectangle as `(x0, y0, x1, y1)`.
+type Span = (f32, f32, f32, f32);
+
+fn placed(f: NSRect) -> Span {
+    let (x, y) = (f.origin.x as f32, f.origin.y as f32);
+    (x, y, x + f.size.width as f32, y + f.size.height as f32)
+}
+
+/// Whether `rect` (in its parent's content space) is not clipped away by
+/// `ancestors`, innermost first: each one's placed frame (in its own
+/// parent's content space) and the origin its content shows from (a
+/// scroll view's offset, (0, 0) otherwise).
+fn clip_shows(rect: Span, ancestors: impl IntoIterator<Item = (Span, (f32, f32))>) -> bool {
+    let (mut x0, mut y0, mut x1, mut y1) = rect;
+    for (frame, (ox, oy)) in ancestors {
+        let (w, h) = (frame.2 - frame.0, frame.3 - frame.1);
+        x0 = x0.max(ox);
+        y0 = y0.max(oy);
+        x1 = x1.min(ox + w);
+        y1 = y1.min(oy + h);
+        if x1 <= x0 || y1 <= y0 {
+            return false;
+        }
+        // Into the grandparent's content space: the offset origin shows
+        // at the frame's origin.
+        x0 += frame.0 - ox;
+        x1 += frame.0 - ox;
+        y0 += frame.1 - oy;
+        y1 += frame.1 - oy;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_row_shows_through_the_scroll_offset() {
+        let screen = ((0.0, 0.0, 400.0, 800.0), (0.0, 0.0));
+        let row = (0.0, 0.0, 400.0, 40.0);
+        let list = |y| ((0.0, 0.0, 400.0, 600.0), (0.0, y));
+        assert!(clip_shows(row, [list(0.0), screen]));
+        assert!(!clip_shows(row, [list(1000.0), screen]));
+    }
+
+    #[test]
+    fn a_text_in_a_pinned_sticky_header_shows() {
+        // The header's logical frame is at the top of the content; scrolled
+        // 1000 points, it is placed (shifted) at 1000, where the list shows.
+        let text = (8.0, 8.0, 200.0, 32.0);
+        let header = ((0.0, 1000.0, 400.0, 1040.0), (0.0, 0.0));
+        let list = ((0.0, 0.0, 400.0, 600.0), (0.0, 1000.0));
+        assert!(clip_shows(text, [header, list]));
+        let logical = ((0.0, 0.0, 400.0, 40.0), (0.0, 0.0));
+        assert!(!clip_shows(text, [logical, list]));
+    }
+
+    #[test]
+    fn a_text_in_a_mirrored_cell_shows() {
+        // A 400-point mirrored list scrolled 500 points: its bounds origin is
+        // -500, and the cell at logical x 600 is placed at 400 - 600 - 90.
+        let text = (10.0, 10.0, 80.0, 70.0);
+        let list = ((0.0, 0.0, 400.0, 80.0), (-500.0, 0.0));
+        let cell = ((-290.0, 0.0, -200.0, 80.0), (0.0, 0.0));
+        assert!(clip_shows(text, [cell, list]));
+        let logical = ((600.0, 0.0, 690.0, 80.0), (0.0, 0.0));
+        assert!(!clip_shows(text, [logical, list]));
+    }
 
     #[test]
     fn scripted_wheels_are_the_event_handled() {
