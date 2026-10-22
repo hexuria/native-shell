@@ -432,20 +432,30 @@ pub(crate) fn apply_title_bar(surface: &Surface) {
         return;
     };
     let hidden = surface.chrome.style.get() == TitleBarStyle::Hidden;
+    // This runs again whenever the window changes, another screen's
+    // backing scale too: AppKit's setters do their work even for the value
+    // the window has, so only what differs is set.
     let mut mask = window.styleMask();
     if hidden {
         mask |= NSWindowStyleMask::FullSizeContentView;
     } else {
         mask &= !NSWindowStyleMask::FullSizeContentView;
     }
-    window.setStyleMask(mask);
+    if window.styleMask() != mask {
+        window.setStyleMask(mask);
+    }
     apply_toolbar(surface, &window, hidden);
-    window.setTitlebarAppearsTransparent(hidden);
-    window.setTitleVisibility(if hidden {
+    if window.titlebarAppearsTransparent() != hidden {
+        window.setTitlebarAppearsTransparent(hidden);
+    }
+    let visibility = if hidden {
         NSWindowTitleVisibility::Hidden
     } else {
         NSWindowTitleVisibility::Visible
-    });
+    };
+    if window.titleVisibility() != visibility {
+        window.setTitleVisibility(visibility);
+    }
     update_area(surface);
     // AppKit can restore the old content size after setStyleMask returns.
     // Reconcile it after that pass, using the current window and style so
