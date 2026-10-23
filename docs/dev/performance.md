@@ -19,6 +19,10 @@ coalescing interval, with the latest coordinates kept independently per view and
   bundling included); applying a hot update takes 0.2–0.5ms on the engine thread.
 - gallery Photos list (`examples/gallery/Bench.tsx`, debug, headless): first frame 653 ops / 224 nodes, ~2.7ms (list bind
   rounds included).
+- Paced list binds (`Bench.tsx` scrolled 3000 pt, release, headless, three runs): the first commit binds the viewport,
+  786 ops / 641 mount items in ~1.1ms (1226 / 1029 in ~1.5ms when the whole overscan bound with it); the overscan
+  follows in commits of ~165 ops / 138 items. 43 commits and 1923 items in all (40 and 1943 before), commit median
+  ~0.26–0.31ms either way.
 - Photos scrolling (release): a frame that rebinds one row is 4 ops / 4 mount items; frames that reveal no new row call no JS and produce
   no batch. `list_bench` runs at ~9µs per frame back to back (JS ~4µs; ~30µs / JS ~20µs before reactivity went native) and
   ~50µs with caches flushed between frames, but ~60–150µs after the thread sleeps 10ms. The difference is the CPU clocking down while the thread sleeps (Apple CLPC), not the code path; neither QoS (the engine
