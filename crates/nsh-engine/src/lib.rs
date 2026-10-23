@@ -1392,6 +1392,7 @@ impl<M: TextEngine + 'static> Driver<M> {
             touch_move: None,
             hover_moves: Vec::new(),
             hover_moved: None,
+            sets_seen: FxHashMap::default(),
             resized: None,
             pinned: config.pinned,
             net: Net {
@@ -1756,6 +1757,8 @@ struct State<M: TextEngine> {
     hover_moves: Vec<(NodeId, EventKind, EventPayload)>,
     /// When `hover_moves` were last delivered.
     hover_moved: Option<Instant>,
+    /// [`keep_last_sets`]'s buffer, reused.
+    sets_seen: FxHashMap<(u8, NodeId), usize>,
     /// The viewport size a resize set this turn ([`MountSink::resized`]).
     resized: Option<Size<Points>>,
 }
@@ -2083,6 +2086,7 @@ impl<M: TextEngine> State<M> {
     fn commit(&mut self, script: Option<&Script>) -> Option<MountBatch> {
         let start = Instant::now();
         let mut merged: Option<MountBatch> = None;
+        let mut commits = 0;
         let mut op_count = 0;
         let mut js = std::time::Duration::ZERO;
         // The overscan bound this turn ([`PACED_BIND_OPS`]).
@@ -2167,6 +2171,7 @@ impl<M: TextEngine> State<M> {
                 }
             }
             if let Some(batch) = self.core.commit() {
+                commits += 1;
                 match &mut merged {
                     Some(m) => extend_frame(&mut m.items, batch.items),
                     None => merged = Some(batch),
@@ -2191,6 +2196,11 @@ impl<M: TextEngine> State<M> {
             {
                 break;
             }
+        }
+        if commits > 1
+            && let Some(batch) = &mut merged
+        {
+            keep_last_sets(&mut batch.items, &mut self.sets_seen);
         }
         self.committed_since_gc |= op_count > 0;
         if self.perf.is_some() && (op_count > 0 || merged.is_some()) {
@@ -2422,11 +2432,7 @@ impl PacedBinds {
 /// that the frame already sets is updated to the later size (unless the
 /// view scrolls in between): a row relaid over two commits must not send
 /// the platform a transient size, which clamps the offset before the
-/// content grows back (a list jumping when a row expands). An item that
-/// sets one part of a view whole (its frame, style, text, ...) replaces
-/// the frame's earlier one for that view: the platform would apply both
-/// in one pass, and a list's rounds (binds, then the paced ones) relay
-/// and restyle the same cells.
+/// content grows back (a list jumping when a row expands).
 fn extend_frame(frame: &mut Vec<nsh_core::MountItem>, items: Vec<nsh_core::MountItem>) {
     use nsh_core::MountItem;
     let start = frame.len();
@@ -2444,17 +2450,28 @@ fn extend_frame(frame: &mut Vec<nsh_core::MountItem>, items: Vec<nsh_core::Mount
             *s = size;
         }
     }
-    if start == 0 {
-        return;
+}
+
+/// Of the items of a frame merged from several commits that set one part
+/// of a view whole (its frame, style, text, ...), keeps the last: the
+/// platform would apply each in one pass, and a list's rounds (binds, then
+/// the paced ones) relay and restyle the same cells. Once per turn, with
+/// `last` the reused buffer.
+fn keep_last_sets(frame: &mut Vec<nsh_core::MountItem>, last: &mut FxHashMap<(u8, NodeId), usize>) {
+    last.clear();
+    let mut repeated = false;
+    for (k, item) in frame.iter().enumerate() {
+        if let Some(key) = sets_whole(item) {
+            repeated |= last.insert(key, k).is_some();
+        }
     }
-    let later: rustc_hash::FxHashSet<_> = frame[start..].iter().filter_map(sets_whole).collect();
-    if later.is_empty() {
+    if !repeated {
         return;
     }
     let mut k = 0;
-    frame.retain(|m| {
+    frame.retain(|item| {
         k += 1;
-        k > start || sets_whole(m).is_none_or(|key| !later.contains(&key))
+        sets_whole(item).is_none_or(|key| last[&key] == k - 1)
     });
 }
 
@@ -2616,6 +2633,7 @@ mod tests {
             at(6, 0.0),
         ];
         super::extend_frame(&mut frame, vec![at(4, 50.0)]);
+        super::keep_last_sets(&mut frame, &mut Default::default());
         assert!(matches!(frame[0], MountItem::Create { id: 4, .. }));
         let frames: Vec<_> = frame
             .iter()
