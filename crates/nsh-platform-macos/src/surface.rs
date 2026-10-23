@@ -5,8 +5,9 @@
 //! wakes the main thread once (`DispatchQueue::main`); the main thread
 //! drains the queue and applies every batch in order ([`Surface::drain`]).
 //! Native animations and JS frame requests run on the root view's display
-//! link while there is something to do. While it runs, batches wait for
-//! the start of the next frame and each frame applies them for at most
+//! link while there is something to do. While native animations or the
+//! platform's own (scroll glides) run, batches wait for the start of the
+//! next frame and each frame applies them for at most
 //! [`FRAME_BATCHES`] ([`Surface::apply_queued`]): a scroll glide's frames
 //! are not delayed by batches landing between them, and several batches
 //! (list binds while scrolling) spread over frames instead of one frame
@@ -201,8 +202,9 @@ pub(crate) struct Surface {
     pub(crate) host_environment: Cell<nsh_core::platform::HostEnvironment>,
     /// JS asked for a display frame.
     js_frame: Cell<bool>,
-    /// Batches that arrived while frames run, applied at the start of the
-    /// next ones ([`Surface::apply_queued`]); only [`Message::Batch`].
+    /// Batches that arrived while animations run, and what came after
+    /// them, applied at the start of the next frames
+    /// ([`Surface::apply_queued`]).
     queued: RefCell<VecDeque<Message>>,
     /// Frame callbacks of the platform's own animations (scroll glides,
     /// transitions): called on every frame while they return true.
@@ -491,8 +493,8 @@ impl Surface {
         r
     }
 
-    /// Handles what the engine sent. While frames run (see the module
-    /// doc), batches wait for the next one ([`Surface::apply_queued`]).
+    /// Handles what the engine sent. While animations run (see the module
+    /// doc), batches wait for the next frame ([`Surface::apply_queued`]).
     fn drain(self: &Rc<Self>) {
         let monitor = self.perf.borrow().clone();
         let start = monitor.as_ref().map(|_| Instant::now());
@@ -504,8 +506,15 @@ impl Surface {
         let mut applied = false;
         quiet(|| {
             for message in messages {
-                // Queued behind earlier batches too, which keeps the order.
-                if matches!(message, Message::Batch(..)) && self.wants_frames() {
+                // A batch waits while the platform's own animations run;
+                // whatever follows a waiting batch waits behind it, which
+                // keeps the order (a frame request only sets a flag).
+                let wait = match message {
+                    Message::Batch(..) => self.defers_batches(),
+                    Message::Frame => false,
+                    _ => !self.queued.borrow().is_empty(),
+                };
+                if wait {
                     self.queued.borrow_mut().push_back(message);
                     continue;
                 }
@@ -643,6 +652,17 @@ impl Surface {
     #[cfg(feature = "dev")]
     pub(crate) fn set_test_model(&self, model: Option<std::sync::Arc<nsh_testing::agent::Model>>) {
         *self.test_model.borrow_mut() = model;
+    }
+
+    /// Whether batches wait for the start of the next frame: while native
+    /// animations or the platform's own (scroll glides, zooms) run, so
+    /// their frames are not delayed by batches landing between them, and
+    /// behind batches already waiting. A frame JS asked for alone does not
+    /// make them wait: what it draws shows in the frame it was asked for.
+    fn defers_batches(&self) -> bool {
+        !self.queued.borrow().is_empty()
+            || self.anim.borrow().animating()
+            || !self.frame_callbacks.borrow().is_empty()
     }
 
     /// Whether the display link should run (animations, frame callbacks,
