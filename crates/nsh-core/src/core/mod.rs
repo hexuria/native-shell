@@ -770,6 +770,8 @@ pub struct Core<M: TextEngine> {
     /// The runtime's lists with overscan cells waiting to bind
     /// ([`Core::take_paced_list_binds`]), in the order they asked.
     paced_lists: Vec<NodeId>,
+    /// [`Core::take_paced_list_binds`]'s buffer, reused.
+    paced_scratch: Vec<(u32, u32)>,
     /// The events for JS, in order (the platform's and the core's events,
     /// Rust components' events, calls' results).
     events: Vec<crate::ui::JsEvent>,
@@ -903,6 +905,7 @@ impl<M: TextEngine> Core<M> {
             safe_area: EdgeInsets::default(),
             list_binds: Vec::new(),
             paced_lists: Vec::new(),
+            paced_scratch: Vec::new(),
             events: Vec::new(),
             cells_scratch: Vec::new(),
             root,
@@ -1179,6 +1182,7 @@ impl<M: TextEngine> Core<M> {
     pub fn take_paced_list_binds(&mut self, cells: usize, out: &mut Vec<ListBind>) {
         let mut left = cells;
         let mut lists = std::mem::take(&mut self.paced_lists);
+        let mut one = std::mem::take(&mut self.paced_scratch);
         let start = out.len();
         while left > 0 && !lists.is_empty() {
             lists.retain(|&id| {
@@ -1192,9 +1196,9 @@ impl<M: TextEngine> Core<M> {
                 else {
                     return false;
                 };
-                let mut binds = Vec::new();
-                left -= list.take_paced(1, &mut binds);
-                if let Some((slot, index)) = binds.pop() {
+                one.clear();
+                left -= list.take_paced(1, &mut one);
+                if let Some((slot, index)) = one.pop() {
                     match out[start..].iter_mut().find(|b| b.list == id) {
                         Some(bind) => bind.binds.push((slot, index)),
                         None => out.push(ListBind {
@@ -1207,6 +1211,7 @@ impl<M: TextEngine> Core<M> {
             });
         }
         self.paced_lists = lists;
+        self.paced_scratch = one;
     }
 
     /// Moves what the core hands JS (events it raised, such as
