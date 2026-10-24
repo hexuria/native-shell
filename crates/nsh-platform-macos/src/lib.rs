@@ -33,6 +33,8 @@ mod decor;
 pub mod dev;
 mod file_drop;
 mod fps;
+#[cfg(feature = "gpui-agent")]
+mod gpui_agent;
 mod gpu;
 mod image;
 mod input;
@@ -45,7 +47,6 @@ mod picker;
 mod scroll;
 mod selection_area;
 mod surface;
-#[cfg(feature = "dev")]
 mod synth;
 mod system;
 mod text;
